@@ -1,3 +1,31 @@
 spring:
   application:
     name: coupon_prac
+
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/coupon}
+    username: ${DB_USERNAME:coupon}
+    password: ${DB_PASSWORD:coupon}
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+management:
+  server:
+    port: ${MANAGEMENT_PORT:9091}
+    address: ${MANAGEMENT_ADDRESS:127.0.0.1}
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
