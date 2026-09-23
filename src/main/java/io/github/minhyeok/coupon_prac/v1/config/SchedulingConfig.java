@@ -1,4 +1,4 @@
-package io.github.minhyeok.coupon_prac.config;
+package io.github.minhyeok.coupon_prac.v1.config;
 
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
