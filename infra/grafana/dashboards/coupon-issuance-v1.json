@@ -1,0 +1,203 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Coupon Issuance V1 — 읽는 순서",
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+      "options": {
+        "mode": "markdown",
+        "content": "1. **K6 client**: 실제 사용자가 경험한 RPS·p95/p99·실패율을 확인합니다.\\n2. **Application**: 서버가 받은 요청의 상태·지연·오류를 확인합니다.\\n3. **Hikari**: active가 max에 붙고 pending이 증가하면 DB 커넥션 풀이 첫 병목입니다.\\n4. **MySQL**: 실행 스레드와 row lock wait로 DB 병목·잠금 경합을 확인합니다.\\n\\nK6 p95/p99는 연결 대기와 타임아웃을 포함하므로 서버 p95/p99보다 클 수 있습니다."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "K6 coupon RPS",
+      "gridPos": {"h": 5, "w": 4, "x": 8, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "reqps", "decimals": 1, "color": {"mode": "palette-classic"}}, "overrides": []},
+      "options": {"reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area"},
+      "targets": [{"refId": "A", "expr": "sum(rate(k6_http_reqs_total{testid=~\"$testid\",name=\"issue_coupon\"}[$__rate_interval]))"}]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "K6 p95",
+      "gridPos": {"h": 5, "w": 4, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s", "decimals": 3, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.5}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "options": {"reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area"},
+      "targets": [{"refId": "A", "expr": "max(k6_http_req_duration_p95{testid=~\"$testid\",name=\"issue_coupon\"})"}]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "K6 p99",
+      "gridPos": {"h": 5, "w": 4, "x": 16, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s", "decimals": 3, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}, {"color": "red", "value": 2}]}}, "overrides": []},
+      "options": {"reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area"},
+      "targets": [{"refId": "A", "expr": "max(k6_http_req_duration_p99{testid=~\"$testid\",name=\"issue_coupon\"})"}]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "K6 HTTP failure rate",
+      "gridPos": {"h": 5, "w": 4, "x": 20, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 2, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.001}]}}, "overrides": []},
+      "options": {"reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area"},
+      "targets": [{"refId": "A", "expr": "avg(k6_http_req_failed_rate{testid=~\"$testid\"})"}]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "K6 coupon issuance outcomes / second",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops", "color": {"mode": "palette-classic"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(k6_coupon_issue_success_response_total{testid=~\"$testid\"}[$__rate_interval]))", "legendFormat": "201 / issued or idempotent"},
+        {"refId": "B", "expr": "sum(rate(k6_coupon_issue_sold_out_total{testid=~\"$testid\"}[$__rate_interval]))", "legendFormat": "409 / sold out"},
+        {"refId": "C", "expr": "sum(rate(k6_coupon_issue_daily_limit_rejected_total{testid=~\"$testid\"}[$__rate_interval]))", "legendFormat": "409 / daily limit"},
+        {"refId": "D", "expr": "sum(rate(k6_coupon_issue_unexpected_response_total{testid=~\"$testid\"}[$__rate_interval]))", "legendFormat": "unexpected"}
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "K6 saturation — dropped iterations and VUs",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}, "overrides": [{"matcher": {"id": "byName", "options": "dropped / second"}, "properties": [{"id": "unit", "value": "ops"}]}]},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(k6_dropped_iterations_total{testid=~\"$testid\"}[$__rate_interval]))", "legendFormat": "dropped / second"},
+        {"refId": "B", "expr": "max(k6_vus{testid=~\"$testid\"})", "legendFormat": "active VUs"},
+        {"refId": "C", "expr": "max(k6_vus_max{testid=~\"$testid\"})", "legendFormat": "VU limit"}
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Application coupon responses / second",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "reqps", "color": {"mode": "palette-classic"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (status) (rate(http_server_requests_seconds_count{job=\"coupon-api\",method=\"POST\",uri=\"/api/v1/coupon-events/{eventId}/coupons\"}[$__rate_interval]))", "legendFormat": "HTTP {{status}}"}]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Application coupon HTTP p95 / p99",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s", "color": {"mode": "palette-classic"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{job=\"coupon-api\",method=\"POST\",uri=\"/api/v1/coupon-events/{eventId}/coupons\"}[$__rate_interval])))", "legendFormat": "server p95"},
+        {"refId": "B", "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_requests_seconds_bucket{job=\"coupon-api\",method=\"POST\",uri=\"/api/v1/coupon-events/{eventId}/coupons\"}[$__rate_interval])))", "legendFormat": "server p99"}
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "HikariCP — first bottleneck check",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "palette-classic"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "hikaricp_connections_active{job=\"coupon-api\"}", "legendFormat": "active"},
+        {"refId": "B", "expr": "hikaricp_connections_pending{job=\"coupon-api\"}", "legendFormat": "pending"},
+        {"refId": "C", "expr": "hikaricp_connections_idle{job=\"coupon-api\"}", "legendFormat": "idle"},
+        {"refId": "D", "expr": "hikaricp_connections_max{job=\"coupon-api\"}", "legendFormat": "max"}
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "JVM heap and process CPU",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}, "overrides": [{"matcher": {"id": "byName", "options": "heap used"}, "properties": [{"id": "unit", "value": "bytes"}]}, {"matcher": {"id": "byName", "options": "process CPU"}, "properties": [{"id": "unit", "value": "percentunit"}]}]},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "sum(jvm_memory_used_bytes{job=\"coupon-api\",area=\"heap\"})", "legendFormat": "heap used"},
+        {"refId": "B", "expr": "process_cpu_usage{job=\"coupon-api\"}", "legendFormat": "process CPU"}
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "MySQL connected / running threads and queries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 29},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}, "overrides": [{"matcher": {"id": "byName", "options": "queries / second"}, "properties": [{"id": "unit", "value": "ops"}]}]},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "mysql_global_status_threads_connected", "legendFormat": "connected"},
+        {"refId": "B", "expr": "mysql_global_status_threads_running", "legendFormat": "running"},
+        {"refId": "C", "expr": "rate(mysql_global_status_questions[$__rate_interval])", "legendFormat": "queries / second"}
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "InnoDB row lock contention",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 29},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}, "overrides": [{"matcher": {"id": "byName", "options": "lock waits / second"}, "properties": [{"id": "unit", "value": "ops"}]}, {"matcher": {"id": "byName", "options": "current lock waits"}, "properties": [{"id": "unit", "value": "short"}]}]},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "mysql_global_status_innodb_row_lock_current_waits", "legendFormat": "current lock waits"},
+        {"refId": "B", "expr": "rate(mysql_global_status_innodb_row_lock_waits[$__rate_interval])", "legendFormat": "lock waits / second"},
+        {"refId": "C", "expr": "rate(mysql_global_status_innodb_row_lock_time[$__rate_interval]) / 1000", "legendFormat": "lock wait seconds / second"}
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Coupon API 5xx by error type",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 37},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "reqps", "color": {"mode": "palette-classic"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max", "total"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (error) (rate(http_server_requests_seconds_count{job=\"coupon-api\",method=\"POST\",status=~\"5..\",uri=\"/api/v1/coupon-events/{eventId}/coupons\"}[$__rate_interval]))", "legendFormat": "{{error}}"}]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["coupon", "v1", "loadtest"],
+  "templating": {
+    "list": [
+      {
+        "name": "testid",
+        "label": "K6 test ID",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "definition": "label_values(k6_http_reqs_total, testid)",
+        "query": {"query": "label_values(k6_http_reqs_total, testid)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 1,
+        "sort": 1,
+        "current": {"text": "All", "value": ["$__all"], "selected": true}
+      }
+    ]
+  },
+  "time": {"from": "now-15m", "to": "now"},
+  "timezone": "browser",
+  "title": "Coupon Issuance V1",
+  "uid": "coupon-issuance-v1",
+  "version": 1
+}

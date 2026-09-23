@@ -20,19 +20,6 @@ services:
       retries: 20
       start_period: 30s
 
-  redis:
-    image: redis:7.4
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
-    ports:
-      - "127.0.0.1:6379:6379"
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   mysql-exporter:
     image: prom/mysqld-exporter:v0.20.0
     command:
@@ -43,14 +30,6 @@ services:
       MYSQLD_EXPORTER_PASSWORD: coupon-exporter
     depends_on:
       mysql:
-        condition: service_healthy
-
-  redis-exporter:
-    image: oliver006/redis_exporter:v1.91.1
-    environment:
-      REDIS_ADDR: redis://redis:6379
-    depends_on:
-      redis:
         condition: service_healthy
 
   prometheus:
@@ -81,8 +60,27 @@ services:
     depends_on:
       - prometheus
 
+  k6:
+    image: grafana/k6:0.54.0
+    profiles: ["loadtest"]
+    environment:
+      BASE_URL: ${LOAD_TEST_BASE_URL:-http://host.docker.internal:8080}
+      K6_TEST_ID: ${K6_TEST_ID:-coupon-v1}
+      K6_MAX_RPS: ${K6_MAX_RPS:-2000}
+      K6_RAMP_DURATION: ${K6_RAMP_DURATION:-60s}
+      K6_PRE_ALLOCATED_VUS: ${K6_PRE_ALLOCATED_VUS:-1000}
+      K6_MAX_VUS: ${K6_MAX_VUS:-3000}
+      K6_PROMETHEUS_RW_SERVER_URL: http://prometheus:9090/api/v1/write
+      K6_PROMETHEUS_RW_TREND_STATS: p(95),p(99),avg,max
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - prometheus
+    volumes:
+      - ./loadtest/k6:/scripts:ro
+    command: run -o experimental-prometheus-rw /scripts/coupon-issuance-ramp-up.js
+
 volumes:
   mysql-data:
-  redis-data:
   prometheus-data:
   grafana-data:
