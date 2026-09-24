@@ -61,15 +61,26 @@ services:
       - prometheus
 
   k6:
-    image: grafana/k6:0.54.0
+    build:
+      context: ./loadtest
+    image: coupon-prac-k6:local
     profiles: ["loadtest"]
     environment:
       BASE_URL: ${LOAD_TEST_BASE_URL:-http://host.docker.internal:8080}
-      K6_TEST_ID: ${K6_TEST_ID:-coupon-v1}
+      K6_TEST_ID: ${K6_TEST_ID:-coupon-${K6_VERSION:-v1}}
       K6_MAX_RPS: ${K6_MAX_RPS:-2000}
       K6_RAMP_DURATION: ${K6_RAMP_DURATION:-60s}
       K6_PRE_ALLOCATED_VUS: ${K6_PRE_ALLOCATED_VUS:-1000}
       K6_MAX_VUS: ${K6_MAX_VUS:-3000}
+      K6_ALLOW_DB_WRITES: ${K6_ALLOW_DB_WRITES:-0}
+      K6_DB_DSN: ${K6_DB_DSN:-coupon:coupon@tcp(mysql:3306)/coupon?timeout=5s&readTimeout=30s&writeTimeout=30s}
+      K6_MODE: ${K6_MODE:-run}
+      K6_RUN_ID: ${K6_RUN_ID:-}
+      K6_EVENT_COUNT: ${K6_EVENT_COUNT:-30}
+      K6_COUPONS_PER_EVENT: ${K6_COUPONS_PER_EVENT:-500}
+      K6_USER_COUNT: ${K6_USER_COUNT:-50000}
+      K6_VALID_SECONDS: ${K6_VALID_SECONDS:-3600}
+      K6_REQUIRE_SOLD_OUT: ${K6_REQUIRE_SOLD_OUT:-true}
       K6_PROMETHEUS_RW_SERVER_URL: http://prometheus:9090/api/v1/write
       K6_PROMETHEUS_RW_TREND_STATS: p(95),p(99),avg,max
     extra_hosts:
@@ -78,7 +89,7 @@ services:
       - prometheus
     volumes:
       - ./loadtest/k6:/scripts:ro
-    command: run -o experimental-prometheus-rw /scripts/coupon-issuance-ramp-up.js
+    command: run -o experimental-prometheus-rw /scripts/${K6_VERSION:-v1}/coupon-issuance-ramp-up.js
 
 volumes:
   mysql-data:

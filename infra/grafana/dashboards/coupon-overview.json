@@ -78,7 +78,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (job) (rate(http_server_requests_seconds_count{job=~\"coupon-api|coupon-scheduler\",uri!~\"/actuator.*\"}[1m]))",
+          "expr": "sum by (job) (rate(http_server_requests_seconds_count{job=~\"coupon-api\",uri!~\"/actuator.*\"}[1m]))",
           "legendFormat": "{{job}}"
         }
       ]
@@ -112,12 +112,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, job) (rate(http_server_requests_seconds_bucket{job=~\"coupon-api|coupon-scheduler\",uri!~\"/actuator.*\"}[1m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, job) (rate(http_server_requests_seconds_bucket{job=~\"coupon-api\",uri!~\"/actuator.*\"}[1m])))",
           "legendFormat": "p95 {{job}}"
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.99, sum by (le, job) (rate(http_server_requests_seconds_bucket{job=~\"coupon-api|coupon-scheduler\",uri!~\"/actuator.*\"}[1m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, job) (rate(http_server_requests_seconds_bucket{job=~\"coupon-api\",uri!~\"/actuator.*\"}[1m])))",
           "legendFormat": "p99 {{job}}"
         }
       ]
@@ -151,7 +151,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (job) (rate(http_server_requests_seconds_count{job=~\"coupon-api|coupon-scheduler\",uri!~\"/actuator.*\",status=~\"5..\"}[1m])) / clamp_min(sum by (job) (rate(http_server_requests_seconds_count{job=~\"coupon-api|coupon-scheduler\",uri!~\"/actuator.*\"}[1m])), 0.001)",
+          "expr": "sum by (job) (rate(http_server_requests_seconds_count{job=~\"coupon-api\",uri!~\"/actuator.*\",status=~\"5..\"}[1m])) / clamp_min(sum by (job) (rate(http_server_requests_seconds_count{job=~\"coupon-api\",uri!~\"/actuator.*\"}[1m])), 0.001)",
           "legendFormat": "{{job}}"
         }
       ]
@@ -185,7 +185,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (job) (jvm_memory_used_bytes{job=~\"coupon-api|coupon-scheduler\",area=\"heap\"})",
+          "expr": "sum by (job) (jvm_memory_used_bytes{job=~\"coupon-api\",area=\"heap\"})",
           "legendFormat": "{{job}}"
         }
       ]
@@ -219,17 +219,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "hikaricp_connections_active{job=~\"coupon-api|coupon-scheduler\"}",
+          "expr": "hikaricp_connections_active{job=~\"coupon-api\"}",
           "legendFormat": "active {{job}}"
         },
         {
           "refId": "B",
-          "expr": "hikaricp_connections_pending{job=~\"coupon-api|coupon-scheduler\"}",
+          "expr": "hikaricp_connections_pending{job=~\"coupon-api\"}",
           "legendFormat": "pending {{job}}"
         },
         {
           "refId": "C",
-          "expr": "hikaricp_connections_max{job=~\"coupon-api|coupon-scheduler\"}",
+          "expr": "hikaricp_connections_max{job=~\"coupon-api\"}",
           "legendFormat": "max {{job}}"
         }
       ]
@@ -347,5 +347,5 @@
       ]
     }
   ],
-  "description": "Local API, scheduler, MySQL and Redis metrics. Application HTTP panels populate after application requests; stopped processes appear DOWN."
+  "description": "Local API, MySQL and Redis metrics. Application HTTP panels populate after application requests; stopped processes appear DOWN."
 }

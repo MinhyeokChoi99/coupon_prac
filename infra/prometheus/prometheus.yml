@@ -8,15 +8,9 @@ scrape_configs:
     static_configs:
       - targets: ["host.docker.internal:9091"]
 
-  - job_name: coupon-scheduler
-    metrics_path: /actuator/prometheus
-    static_configs:
-      - targets: ["host.docker.internal:9092"]
-
   - job_name: mysql
     static_configs:
       - targets: ["mysql-exporter:9104"]
-
 
   - job_name: prometheus
     static_configs:

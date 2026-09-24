@@ -2,7 +2,8 @@
 
 ![현재 쿠폰 ERD](assets/current-coupon-erd.png)
 
-기준 이미지는 `쿠우폰 (9).png`다. 아래는 저장소 코드와 V3 마이그레이션에 맞춘 설명이다.
+기준 이미지는 `쿠우폰 (9).png`다. 아래는 저장소 코드와 V4까지의 마이그레이션에 맞춘 설명이다.
+패키지·서비스 메서드·API 대응은 [v1 구현 안내](v1/README.md)를 참고한다.
 SQL은 실행 순서를 이해하기 위한 형태이며, 실제 JPA SQL은 컬럼 나열과 별칭이 다를 수 있다.
 `:userId` 같은 값은 바인딩 파라미터다.
 
@@ -93,13 +94,17 @@ coupon_usage_history: 아직 없음
 
 ### 1-2. 코드에서 어떻게 호출하는가?
 
-`CouponEventPreparationService.prepare(campaignId, date, issueStart, issueEnd, now)`를 호출한다.
+`CouponService.prepareEvent(campaignId, date, issueStart, issueEnd, now)`를 호출한다.
+이벤트가 이미 준비되어 있다면 `CouponService.loadInventory(eventId, now)`로 재고를 준비할 수 있다.
 
 예: 한국 날짜 9월 23일, 발급 시간 11:00~13:00.
+이 서비스는 명시적으로 호출하는 사전 적재 도구이며 앱 시작 시 실행되지 않는다.
 캠페인의 사용 시간이 11:00~14:00이면 날짜와 결합하고 UTC로 변환해 저장한다.
-사용 종료 시간이 시작 시간보다 이르면 다음 날 종료하는 것으로 처리한다.
+사용 종료 시간이 시작 시간보다 이르거나 같으면 다음 날 종료하는 것으로 처리한다.
 
-스케줄러 등록과 캠페인 생성 HTTP API는 아직 없다. 현재 부하테스트 프로필은 준비 서비스를 구성하는 엔티티·로더를 이용해 테스트 데이터를 생성한다.
+앱은 DB에 미리 적재된 데이터를 사용하며, 스케줄링 설정과 자동 상태 전환을 사용하지 않는다.
+부하테스트에서는 k6의 `setup()`이 SQL로 데이터를 사전 적재한다. 서버에 테스트 전용 API나 프로필은 없다.
+k6가 부하 실행 후 DB 정합성을 검증하고 해당 실행의 데이터만 삭제한다. [실행 안내](load-testing.md)
 
 ### 1-3. 어떤 SQL이 나가는가?
 
@@ -121,7 +126,7 @@ INSERT INTO coupon_event (
 ) VALUES (
     :campaignId, :businessDate, :quantity,
     :issueStartUtc, :issueEndUtc, :usableStartUtc, :usableEndUtc,
-    'SCHEDULED', :nowUtc, :nowUtc
+    'ACTIVE', :nowUtc, :nowUtc
 );
 
 -- 생성된 eventId에 대해 1~100번을 각각 저장한다.
@@ -146,12 +151,12 @@ Java는 UUID를 16바이트로 직접 바인딩하므로 실제 SQL에서 `UUID_
 
 ### 1-4. 11시에 어떻게 열리는가?
 
-재고 준비 후 `CouponEventLifecycleService.activate(eventId, now)`를 호출한다.
-재고 개수가 `coupon_quantity`와 같아야 ACTIVE로 바꿀 수 있다.
+별도의 상태 전환 작업은 없다. 캠페인·이벤트는 **ACTIVE로 사전 적재**한다.
+이벤트의 `coupon_quantity`만큼 AVAILABLE 재고를 전부 적재한 뒤 앱을 실행해야 한다.
 
-**10시 59분에 ACTIVE로 준비해도 발급은 11시부터 가능하다.**
-발급 서비스가 `status=ACTIVE AND issue_start_at <= 현재시각 < issue_end_at`을 별도로 검사하기 때문이다.
-따라서 상태 전환 스케줄러가 정확히 11:00:00에 실행되어야만 하는 구조가 아니다.
+10시 59분에 ACTIVE 데이터가 이미 있어도 발급은 11시부터 가능하다.
+발급 서비스는 `status=ACTIVE AND issue_start_at <= 현재시각 < issue_end_at`을 검사한다.
+현재 시각은 `Instant.now()`로 직접 확인하며, 잠금 대기 후에도 다시 확인한다.
 
 ## 2. 쿠폰 발급 흐름
 
@@ -213,7 +218,7 @@ SELECT * FROM user_coupon WHERE event_id = :eventId AND user_id = :userId;
 
 SELECT * FROM coupon_event WHERE id = :eventId;
 SELECT * FROM campaign WHERE id = :campaignId;
--- 이벤트 ACTIVE, 캠페인 SCHEDULED/ACTIVE, 발급 시간 범위인지 서버가 확인.
+-- 이벤트 ACTIVE, 캠페인 ACTIVE, 발급 시간 범위인지 서버가 확인.
 -- 한도 행을 기다리던 도중 한국 날짜가 바뀌면 재시도를 요청한다.
 
 UPDATE coupon_daily_limit
@@ -380,6 +385,7 @@ SELECT * FROM coupon_usage_history WHERE user_coupon_id = :couponId;
 
 - V3 마이그레이션은 승인받은 **연습·부하테스트용 기존 4개 테이블 데이터를 삭제**하고 새 7개 테이블을 만든다. 실데이터 환경에 적용하면 안 된다.
 - V1/V2는 이미 적용된 Flyway 체크섬을 유지하기 위해 수정하지 않았다.
-- 재생성 방법은 [부하테스트 안내](load-testing.md)를 따른다. loadtest 프로필이 캠페인 30개, 이벤트 30개, 재고 15,000개, 사용자 50,000명을 준비한다.
+- [부하테스트](load-testing.md)는 k6가 테스트 DB에 캠페인 30개·이벤트 30개·재고 15,000개·사용자 50,000명을 적재하고, HTTP 부하·DB 검증·실행별 정리를 수행한다. 앱에는 부하테스트 전용 코드가 없다.
+- V4는 과거 SCHEDULED 상태를 ACTIVE로 변환한다. V1~V3 파일은 적용 이력과 체크섬 유지를 위해 그대로 둔다.
 - 현재 API는 연습용으로 userId·ownerId를 요청에서 받는다. **인증·인가가 구현된 서비스가 아니다.** 실서비스에서는 로그인 정보로 ID를 결정하고, 주문 금액도 서버의 주문/POS 데이터에서 가져와야 한다.
-- 가게·점주·메뉴 CRUD, 타깃 노출·포인트 차감, 예약 작업 등록, 품절 도메인 이벤트, 취소·환불 처리는 범위 밖이다.
+- 가게·점주·메뉴 CRUD, 타깃 노출·포인트 차감, 품절 도메인 이벤트, 취소·환불 처리는 범위 밖이다.

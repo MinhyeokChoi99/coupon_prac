@@ -1,97 +1,150 @@
 # 쿠폰 발급 부하테스트
 
-이 환경은 API 인스턴스 한 대에서 다음 ramp-up 시나리오를 재현한다.
+k6 한 번 실행으로 **테스트 데이터 적재 → HTTP 부하 → DB 결과 검증 → 해당 데이터 삭제**를 수행한다.
+서버의 `loadtest` 패키지·프로필·내부 테스트 API는 사용하지 않는다.
 
-```text
-동시 이벤트: 30개
-이벤트별 쿠폰: 500장
-총 재고: 15,000장
-고유 사용자: 50,000명
-사용자당 평균 추가 재시도: 0.2회
-총 요청: 60,000건
-부하: 0 RPS에서 2,000 RPS까지 60초 동안 선형 증가
-```
+현재 구현은 **v1**이며 스크립트는 `loadtest/k6/v1/`에 있다.
+`K6_VERSION=v1`(기본값)은 실행 디렉터리만 선택하며 API URL을 치환하지 않는다.
+v2 추가 시 자체 API·적재·검증 SQL을 `loadtest/k6/v2/`에 작성한다. 아직 v2 실행 파일은 없다.
+자세한 파일 역할과 버전 추가 규칙은 [k6 디렉터리 안내](../loadtest/k6/README.md)를 참고한다.
 
-선형 증가 구간의 평균 요청률은 1,000 RPS이므로 기본 설정으로 총 60,000건이 발생한다. 이는 2,000 RPS를 유지하는 테스트가 아니다.
+## 실행 순서
 
-## 시작
+1. `setup()`: 고유 실행 ID를 만들고 사용자·캠페인·ACTIVE 이벤트·AVAILABLE 재고를 SQL로 적재한다.
+2. `default()`: 실제 쿠폰 발급 API만 호출한다. 측정 중 DB 직접 조회는 하지 않는다.
+3. `teardown()`: 커밋된 DB 데이터로 수량·중복·재고 매칭·일일 한도를 검증하고 결과를 출력한다.
+4. 검증 성공/실패와 무관하게 `finally`에서 이 실행의 데이터만 FK 역순으로 삭제한다.
 
-먼저 MySQL, Prometheus, Grafana를 실행한다.
+앱은 여전히 미리 적재된 데이터를 사용하는 구조다. 자동 스케줄링이나 앱 시작 시 데이터 생성은 없다.
+테스트 실행 전 적재하는 주체만 k6로 옮겼다. 스키마 생성은 앱의 Flyway가 담당한다.
+
+## 준비와 실행
+
+**폐기 가능한 로컬/테스트 DB에서만 실행한다. 운영 DB에는 절대 연결하지 않는다.**
+최초 V3 마이그레이션은 구형 연습 테이블을 삭제한다. 테스트 SQL에 전체 테이블 초기화나 TRUNCATE는 없다.
+
+프로젝트 루트에서 인프라를 시작하고 k6 이미지를 한 번 빌드한다.
 
 ```sh
 docker compose up -d
+docker compose --profile loadtest build k6
 ```
 
-별도 터미널에서 API를 한 인스턴스만 실행한다. `loadtest` 프로필은 캠페인 30개, 이벤트 30개와 이벤트별 500개 재고, 실제 사용자 행 50,000개를 준비한다. 캠페인 `notice='coupon-prac-load-test-v3'`로 테스트 데이터를 구분한다. 발급 시 MySQL이 `FOR UPDATE SKIP LOCKED`로 재고 행 하나를 선점한다.
+이미지는 기존 k6 0.54.0에 `xk6-sql 1.0.0`과 `MySQL 드라이버 0.1.0`을 포함한다.
+버전은 [Dockerfile](../loadtest/Dockerfile)에 고정했다.
+최초 빌드는 이미지와 Go 모듈 다운로드가 필요하다.
+
+별도 터미널에서 API 한 인스턴스를 실행한다. 부하테스트용 Spring 프로필은 필요 없다.
 
 ```sh
-COUPON_LOADTEST_RESET=true MANAGEMENT_ADDRESS=0.0.0.0 ./gradlew bootRun --args='--spring.profiles.active=loadtest --server.address=0.0.0.0'
+MANAGEMENT_ADDRESS=0.0.0.0 ./gradlew bootRun --args='--server.address=0.0.0.0'
 ```
 
-`COUPON_LOADTEST_RESET=true`는 위 마커가 있는 캠페인·이벤트의 사용 기록·사용자 쿠폰·재고·이벤트·캠페인과 예약 사용자 ID 범위(10,000,000~10,049,999)의 일일 한도를 삭제한 뒤 재생성한다. 사용자 행 자체는 유지한다. 예약 ID는 부하테스트 전용이어야 하며 일반 사용자와 충돌하면 실행을 중단한다.
-
-**최초 V3 마이그레이션은 이전 구조의 연습용 4개 테이블과 데이터를 삭제한다. 실데이터 환경에서 실행하면 안 된다.** 이후 fixture reset은 위 테스트 데이터 범위로 제한된다.
-
-K6는 시작 전에 `/internal/load-test/fixture`를 조회해 **30개 이벤트, 15,000개의 AVAILABLE 재고, 발급 쿠폰 0개, 일일 한도 행 0개**를 확인할 때까지 최대 60초 대기한다.
-
-다음 엔드포인트가 30개 이벤트를 반환하면 준비가 끝난 것이다.
+앱 시작과 마이그레이션 완료 후 실행한다.
 
 ```sh
-curl http://localhost:8080/internal/load-test/coupon-events
+K6_ALLOW_DB_WRITES=1 docker compose --profile loadtest run --rm k6
 ```
 
-## 실행
+`K6_ALLOW_DB_WRITES=1`을 지정하지 않으면 SQL 적재·삭제 전에 중단한다.
+Compose 기본 DSN은 `mysql:3306/coupon`의 로컬 개발용 coupon 계정이다.
+API의 DB와 k6의 DB는 반드시 동일해야 한다. DB 접속 권한은 테스트 DB로 제한하고 DSN을 커밋하지 않는다.
+k6는 기존 고정 사용자 ID를 사용하지 않고 이번에 INSERT한 ID를 조회한다.
+
+## 기본 시나리오와 설정
+
+| 항목 | 환경변수 | 기본값 |
+| --- | --- | --- |
+| API 주소 | LOAD_TEST_BASE_URL | http://host.docker.internal:8080 |
+| 시나리오 디렉터리 | K6_VERSION | v1 |
+| MySQL 연결 문자열 | K6_DB_DSN | Compose 로컬 coupon DB |
+| 이벤트 수 | K6_EVENT_COUNT | 30 |
+| 이벤트당 쿠폰 | K6_COUPONS_PER_EVENT | 500 |
+| 고유 사용자 | K6_USER_COUNT | 50000 (5의 배수) |
+| 최대 요청률 | K6_MAX_RPS | 2000 |
+| 선형 증가 시간 | K6_RAMP_DURATION | 60s |
+| 사전 VU / 최대 VU | K6_PRE_ALLOCATED_VUS / K6_MAX_VUS | 1000 / 3000 |
+| 적재 후 발급 유효 시간 | K6_VALID_SECONDS | 3600초 |
+| 모든 재고 소진 필수 | K6_REQUIRE_SOLD_OUT | true |
+| Prometheus 실행 구분 | K6_TEST_ID | coupon-선택버전 (기본 coupon-v1) |
+
+기본 부하는 0 → 2000 RPS로 60초간 증가한다. 이론상 60,000회이며 실제 실행 수는 dropped/interrupted iterations도 확인한다.
+다섯 신규 사용자 뒤 한 명을 재요청하는 패턴으로 60,000회에 고유 사용자 50,000명과 재요청 10,000회를 배치한다.
+동일 사용자 재요청은 같은 이벤트로 간다. HTTP 응답에 따른 추가 재시도는 없다.
+설정을 바꾸면 실제 요청 수가 달라진다. 60,000회를 넘기면 사용자 패턴이 반복된다.
+
+짧은 전체 흐름 확인:
 
 ```sh
+K6_ALLOW_DB_WRITES=1 K6_EVENT_COUNT=2 K6_COUPONS_PER_EVENT=5 K6_USER_COUNT=100 \
+K6_MAX_RPS=20 K6_RAMP_DURATION=5s K6_PRE_ALLOCATED_VUS=5 K6_MAX_VUS=20 \
 docker compose --profile loadtest run --rm k6
 ```
 
-K6 컨테이너는 호스트에서 실행 중인 API의 `http://host.docker.internal:8080`으로 요청한다. Linux 등 다른 주소가 필요하면 실행 시 `LOAD_TEST_BASE_URL`을 바꾼다.
+짧은 테스트에서 재고를 모두 소진하지 않을 목적이면 `K6_REQUIRE_SOLD_OUT=false`로 설정한다.
+이 경우에도 실제 발급 1건 이상과 모든 정합성 검사를 통과해야 한다.
+적재/검증 단계 제한 시간은 각각 5분이며 발급 유효 시간은 적재 시간과 부하 지속 시간보다 넉넉해야 한다.
+
+## 검증 결과
+
+종료 로그의 `DB_VALIDATION` JSON에 이벤트별 수량과 `passed`가 출력된다.
+
+- 이벤트별 전체 재고가 설정 수량과 일치하고 초과 발급이 없는가?
+- ISSUED 재고와 사용자 쿠폰이 수량뿐 아니라 코드별로 일치하는가?
+- 동일 이벤트·사용자의 중복 발급이 없는가?
+- 한국 날짜별 발급 수가 3 이하이고 `coupon_daily_limit.issued_count`와 일치하는가?
+- 기본 모드에서는 모든 이벤트의 재고가 소진되었는가?
+
+정합성 검증 또는 삭제 실패 시 테스트는 0이 아닌 종료 코드를 반환한다.
+성능 기준은 발급 요청만 대상으로 p95 < 500ms, p99 < 1s, 예상하지 않은 응답 0, dropped iterations 0이다.
+성공 응답 수에는 멱등 재응답도 포함되므로 실제 발급 수와 다를 수 있다.
+INVENTORY_BUSY는 다른 요청이 재고를 잠근 경우이며 품절과 구분한다.
+
+결과는 삭제 전에 로그로 출력되고, 성능 지표는 Compose 설정에 따라 Prometheus remote-write로 전송된다.
+SQL 검증 결과 JSON은 콘솔 로그를 보관해야 한다. 실패한 데이터도 자동 삭제되므로 사후 DB 분석용으로 남지 않는다.
+`coupon_database_validation`, `coupon_cleanup_success` 지표로 검증/삭제 성공 여부를 확인한다.
+
+## 안전한 삭제와 강제 종료 복구
+
+각 실행의 32자리 `RUN_ID`를 첫 SQL 쓰기 전에 출력한다.
+
+- 캠페인 마커: `notice = 'k6-coupon:<RUN_ID>'`
+- 사용자 마커: `provider_user_id = 'k6-coupon:<RUN_ID>:<순번>'`
+- 삭제 순서: 사용 기록 → 사용자 쿠폰 → 재고 → 일일 한도 → 이벤트 → 캠페인 → 사용자
+- 다른 실행이나 기존 데이터는 수정하지 않는다.
+- 다른 실행의 사용자가 테스트 이벤트를 참조하는 등 교차 참조가 있으면 삭제를 거절한다.
+- `setup()` 중 예외가 발생하면 해당 함수에서 부분 적재 데이터 정리를 시도한다.
+- 컨테이너 강제 종료, timeout, DB 장애에서는 정리가 보장되지 않는다. 실패 로그의 RUN_ID를 보관한다.
+
+**이전 실행과 관련 API 처리가 완전히 중단된 것을 확인한 후**, 해당 ID만 정리한다.
 
 ```sh
-LOAD_TEST_BASE_URL=http://192.168.0.10:8080 \
+K6_ALLOW_DB_WRITES=1 K6_MODE=cleanup K6_RUN_ID=<로그의_32자리_RUN_ID> \
 docker compose --profile loadtest run --rm k6
 ```
 
-K6 결과는 Prometheus remote-write로 전송된다. Grafana의 `Coupon Issuance V1` 대시보드에서 실행별로 보려면 `K6_TEST_ID`를 지정한다.
+위의 꺾쇠 부분은 실제 ID로 교체한다. 같은 ID의 정리를 반복해도 안전하다.
+복구 모드는 적재·부하·검증 없이 해당 실행만 삭제한다.
+남은 모든 테스트 데이터를 자동으로 지우지는 않는다. 자동 삭제는 실행 중인 다른 테스트를 침범할 수 있기 때문이다.
+삭제 데이터는 이 스크립트로 복구할 수 없다. AUTO_INCREMENT 값은 되돌리지 않는다.
+
+## 스크립트 회귀 테스트
+
+Node.js 22 이상이 있으면 DB 없이 ID 매핑·삭제 범위 방어 로직을 확인한다.
 
 ```sh
-K6_TEST_ID=baseline-mysql-v1 \
-docker compose --profile loadtest run --rm k6
+node --test loadtest/k6/v1/fixture.test.mjs
 ```
 
-짧은 스모크 테스트는 아래처럼 실행할 수 있다. 이 값은 60,000건 시나리오와 정합성 결과가 다르므로 연결 확인 용도로만 사용한다.
+MySQL SQL 회귀 테스트는 동일한 폐기 가능한 테스트 DB에서 실행한다.
+두 독립 실행의 데이터를 생성해 검증 실패 탐지, 타 실행 보존, 교차 참조 삭제 거절, FK 순서, 반복 삭제를 확인한다.
 
 ```sh
-K6_MAX_RPS=20 K6_RAMP_DURATION=5s K6_PRE_ALLOCATED_VUS=20 K6_MAX_VUS=100 \
-docker compose --profile loadtest run --rm k6
+K6_ALLOW_DB_WRITES=1 docker compose --profile loadtest run --rm k6 \
+run /scripts/v1/fixture-regression.js
 ```
 
-## 모니터링과 검증
+서버 기능 검증은 `./gradlew test`의 별도 MySQL Testcontainers에서 수행한다.
+예전 Java 대량 fixture 테스트는 제거하고 실제 k6 SQL 회귀 테스트로 대체했다.
 
-테스트 중 Grafana의 Coupon Overview 대시보드에서 다음을 확인한다.
-
-- HTTP RPS, p95/p99, 5xx 비율
-- HikariCP active/pending/max connection
-- JVM heap
-- MySQL connected/running threads
-
-K6의 `coupon_issue_success_response`, `coupon_issue_sold_out`, `coupon_issue_inventory_busy`, `coupon_issue_daily_limit_rejected`, `coupon_issue_unexpected_response`도 함께 확인한다. INVENTORY_BUSY는 다른 요청이 남은 재고를 잠근 상태이며 실제 품절과 구분한다. 이 스크립트는 응답별 추가 재시도 없이 원래 60,000건 시나리오를 유지한다. 성공 응답에는 멱등 재응답도 포함될 수 있으므로, 최종 발급 수는 DB로 검증한다. 기본 시나리오의 최종 합격 조건은 아래와 같다.
-
-```text
-CouponInventory ISSUED: 15,000건
-UserCoupon: 15,000건
-이벤트별 UserCoupon: 500건
-초과 발급: 0건
-동일 이벤트·사용자 중복 발급: 0건
-사용자 일일 발급 한도 초과: 0건
-5xx: 0건
-HTTP p95: 500ms 이하
-HTTP p99: 1초 이하
-```
-
-테스트가 끝난 뒤 아래 엔드포인트의 `passed`가 `true`인지 확인한다. 이벤트별 발급 재고와 `UserCoupon` 수를 함께 반환한다. 이 엔드포인트는 `loadtest` 프로필에서만 노출된다.
-
-```sh
-curl http://localhost:8080/internal/load-test/result
-```
+참고: [k6 SQL 확장](https://github.com/grafana/xk6-sql), [k6 실행 단계](https://grafana.com/docs/k6/latest/using-k6/test-lifecycle/).
