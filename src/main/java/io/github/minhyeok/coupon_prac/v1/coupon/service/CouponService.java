@@ -180,11 +180,10 @@ public class CouponService {
         }
         LocalDateTime now = LocalDateTime.now();
         LocalDate date = now.toLocalDate();
-        CouponEvent event =
-                events.findById(command.eventId())
+        CouponEventIssuanceContext event =
+                events.findIssuanceContextById(command.eventId())
                         .orElseThrow(() -> new CouponException(CouponErrorCode.EVENT_NOT_FOUND));
-        if (!event.isIssuableAt(now)
-                || !campaigns.findById(event.getCampaignId()).orElseThrow().allowsIssuance()) {
+        if (!event.isIssuableAt(now)) {
             throw new CouponException(CouponErrorCode.EVENT_NOT_ISSUABLE);
         }
         if (!inventory.existsByEventIdAndStatus(
