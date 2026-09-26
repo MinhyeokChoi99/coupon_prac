@@ -6,7 +6,7 @@ import lombok.*;
 
 import java.time.*;
 
-/** 사용자 한 명의 한국 날짜별 발급 횟수. limitDate는 UTC 생성 시각에 9시간을 더해 DB가 계산한다. */
+/** 사용자 한 명의 한국 날짜별 발급 횟수. limitDate는 한국 생성 시각의 날짜를 DB가 계산한다. */
 @Entity
 @Table(name = "coupon_daily_limit")
 @Getter
@@ -31,11 +31,11 @@ public class UserCouponDailyLimit {
     @Column(insertable = false, updatable = false)
     private LocalDate limitDate;
 
-    /** 행 생성 UTC 시각. DATETIME 정밀도에 맞춰 초 단위로 저장한다. */
+    /** 행 생성 한국 시각. Java 원본 정밀도를 유지하며 DB DATETIME 저장은 기본 정밀도 처리에 맡긴다. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant createdAt;
+    private LocalDateTime createdAt;
 
-    /** 마지막 변경 UTC 시각. */
+    /** 마지막 변경 한국 시각. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant updatedAt;
+    private LocalDateTime updatedAt;
 }

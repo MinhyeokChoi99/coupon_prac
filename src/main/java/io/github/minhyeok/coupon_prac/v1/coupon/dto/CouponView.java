@@ -2,7 +2,7 @@ package io.github.minhyeok.coupon_prac.v1.coupon.dto;
 
 import io.github.minhyeok.coupon_prac.v1.coupon.entity.UserCouponStatus;
 
-import java.time.Instant;
+import java.time.LocalDateTime;
 import java.util.UUID;
 
 /**
@@ -12,15 +12,15 @@ import java.util.UUID;
  * @param eventId 발급 이벤트 ID
  * @param couponCode 발급 후 바뀌지 않는 고정 UUID
  * @param status 시간 경과를 반영한 조회 상태
- * @param usableStartTime 사용 시작 UTC 시각(포함)
- * @param usableEndTime 사용 종료 UTC 시각(미포함)
- * @param issuedAt 최초 발급 UTC 시각
+ * @param usableStartTime 사용 시작 한국 시각(포함)
+ * @param usableEndTime 사용 종료 한국 시각(미포함)
+ * @param issuedAt 최초 발급 한국 시각
  */
 public record CouponView(
         Long id,
         Long eventId,
         UUID couponCode,
         UserCouponStatus status,
-        Instant usableStartTime,
-        Instant usableEndTime,
-        Instant issuedAt) {}
+        LocalDateTime usableStartTime,
+        LocalDateTime usableEndTime,
+        LocalDateTime issuedAt) {}

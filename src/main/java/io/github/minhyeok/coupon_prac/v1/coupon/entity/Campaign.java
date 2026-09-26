@@ -5,7 +5,6 @@ import jakarta.persistence.*;
 import lombok.*;
 
 import java.time.*;
-import java.time.temporal.ChronoUnit;
 
 /** 가게별 할인 조건과 일별 쿠폰 수량을 저장한다. 이미 발급한 쿠폰의 조건을 보존하기 위해 발급 이후 설정을 변경하지 않는다. */
 @Entity
@@ -55,7 +54,7 @@ public class Campaign {
     @Column(nullable = false)
     private int issueQuantity;
 
-    /** 쿠폰 사용 가능 시작. 캠페인은 일일 시각, 이벤트·쿠폰은 UTC 시각을 저장한다. */
+    /** 쿠폰 사용 가능 시작. 캠페인은 일일 시각, 이벤트·쿠폰은 한국 시각을 저장한다. */
     @Column(nullable = false)
     private LocalTime usableStartTime;
 
@@ -94,9 +93,9 @@ public class Campaign {
     @Column(nullable = false)
     private LocalDate endDate;
 
-    /** 행 생성 UTC 시각. DATETIME 정밀도에 맞춰 초 단위로 저장한다. */
+    /** 행 생성 한국 시각. Java 원본 정밀도를 유지하며 DB DATETIME 저장은 기본 정밀도 처리에 맡긴다. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant createdAt;
+    private LocalDateTime createdAt;
 
     /**
      * 할인 조건·수량·기간을 검증해 사전 적재용 ACTIVE 캠페인을 생성한다. DB 저장은 호출자가 수행한다.
@@ -114,7 +113,7 @@ public class Campaign {
      * @param minOrderAmount 최소 주문 금액(원); 제한이 없으면 null
      * @param dailyBudget 일일 예산(포인트), 0 이상
      * @param notice 안내 문구 또는 null
-     * @param now 생성 UTC 시각
+     * @param now 생성 한국 시각
      * @return 아직 저장되지 않은 ACTIVE 캠페인
      * @throws IllegalArgumentException 수량·기간·할인·예산·주문 조건이 유효하지 않은 경우
      */
@@ -132,7 +131,7 @@ public class Campaign {
             Integer minOrderAmount,
             int dailyBudget,
             String notice,
-            Instant now) {
+            LocalDateTime now) {
         if (quantity <= 0
                 || startDate.isAfter(endDate)
                 || usableStart.equals(usableEnd)
@@ -162,7 +161,7 @@ public class Campaign {
         campaign.targetAgeGroups = "전체";
         campaign.startDate = startDate;
         campaign.endDate = endDate;
-        campaign.createdAt = now.truncatedTo(ChronoUnit.SECONDS);
+        campaign.createdAt = now;
         return campaign;
     }
 

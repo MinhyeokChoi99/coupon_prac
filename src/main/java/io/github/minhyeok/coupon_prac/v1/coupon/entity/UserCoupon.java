@@ -9,8 +9,7 @@ import lombok.*;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
+import java.time.LocalDateTime;
 import java.util.UUID;
 
 /** 사용자에게 발급된 쿠폰 한 장. 쿠폰 코드는 고정하고 사용 인증용 QR 토큰만 교체한다. */
@@ -48,40 +47,40 @@ public class UserCoupon {
     @Column(columnDefinition = "BINARY(16)")
     private UUID qrToken;
 
-    /** QR 사용 만료 UTC 시각. 토큰이 있으면 함께 설정한다. */
+    /** QR 사용 만료 한국 시각. 토큰이 있으면 함께 설정한다. */
     @Column(columnDefinition = "DATETIME")
-    private Instant qrExpiresAt;
+    private LocalDateTime qrExpiresAt;
 
     /** 해당 도메인의 현재 상태. */
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private UserCouponStatus status;
 
-    /** 쿠폰 사용 가능 시작. 캠페인은 일일 시각, 이벤트·쿠폰은 UTC 시각을 저장한다. */
+    /** 쿠폰 사용 가능 시작. 캠페인은 일일 시각, 이벤트·쿠폰은 한국 시각을 저장한다. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant usableStartTime;
+    private LocalDateTime usableStartTime;
 
     /** 쿠폰 사용 가능 종료. 이 시각부터는 사용할 수 없다. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant usableEndTime;
+    private LocalDateTime usableEndTime;
 
-    /** 행 생성 UTC 시각. DATETIME 정밀도에 맞춰 초 단위로 저장한다. */
+    /** 행 생성 한국 시각. Java 원본 정밀도를 유지하며 DB DATETIME 저장은 기본 정밀도 처리에 맡긴다. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant createdAt;
+    private LocalDateTime createdAt;
 
-    /** 마지막 변경 UTC 시각. */
+    /** 마지막 변경 한국 시각. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant updatedAt;
+    private LocalDateTime updatedAt;
 
     /**
      * 선점한 재고의 코드·사용 기간을 복사해 소유 쿠폰을 만든다. QR 버전은 0, 토큰과 만료 시각은 null이다.
      *
      * @param inventory 발급 트랜잭션에서 독점 선점한 재고
      * @param userId 소유 사용자 ID
-     * @param now 발급 UTC 시각; 생성·수정 시각에 초 단위로 기록한다
+     * @param now 발급 한국 시각; 생성·수정 시각에 그대로 기록한다
      * @return 아직 저장되지 않은 ISSUED 쿠폰
      */
-    public static UserCoupon issue(CouponInventory inventory, Long userId, Instant now) {
+    public static UserCoupon issue(CouponInventory inventory, Long userId, LocalDateTime now) {
         UserCoupon coupon = new UserCoupon();
         coupon.eventId = inventory.getEventId();
         coupon.userId = userId;
@@ -90,18 +89,18 @@ public class UserCoupon {
         coupon.status = UserCouponStatus.ISSUED;
         coupon.usableStartTime = inventory.getUsableStartTime();
         coupon.usableEndTime = inventory.getUsableEndTime();
-        coupon.createdAt = now.truncatedTo(ChronoUnit.SECONDS);
-        coupon.updatedAt = now.truncatedTo(ChronoUnit.SECONDS);
+        coupon.createdAt = now;
+        coupon.updatedAt = now;
         return coupon;
     }
 
     /**
      * ISSUED 상태이며 사용 시작 이상·종료 미만인지 검사한다.
      *
-     * @param now 잠금 획득 후 확인한 UTC 시각
+     * @param now 잠금 획득 후 확인한 한국 시각
      * @throws CouponException 미사용 상태가 아니거나 사용 기간 밖인 경우
      */
-    public void requireUsable(Instant now) {
+    public void requireUsable(LocalDateTime now) {
         if (status != UserCouponStatus.ISSUED
                 || now.isBefore(usableStartTime)
                 || !now.isBefore(usableEndTime))
@@ -111,29 +110,29 @@ public class UserCoupon {
     /**
      * 고정 쿠폰 코드는 유지하고 QR만 새 난수 UUID로 덮어쓴다. 버전을 증가시키며 이전 토큰은 무효다.
      *
-     * <p>만료는 초 단위 현재 시각+60초와 사용 종료 중 빠른 시각이다.
+     * <p>만료는 현재 시각+60초와 사용 종료 중 빠른 시각이다.
      *
-     * @param now QR 생성 UTC 시각
+     * @param now QR 생성 한국 시각
      * @throws CouponException 쿠폰이 사용 불가한 경우
      * @throws ArithmeticException QR 버전이 정수 최댓값을 초과한 경우
      */
-    public void rotateQr(Instant now) {
+    public void rotateQr(LocalDateTime now) {
         requireUsable(now);
         qrToken = UUID.randomUUID();
         qrVersion = Math.incrementExact(qrVersion);
-        Instant expiry = now.truncatedTo(ChronoUnit.SECONDS).plusSeconds(60);
+        LocalDateTime expiry = now.plusSeconds(60);
         qrExpiresAt = expiry.isBefore(usableEndTime) ? expiry : usableEndTime;
-        updatedAt = now.truncatedTo(ChronoUnit.SECONDS);
+        updatedAt = now;
     }
 
     /**
      * 사용 가능 여부를 검사하고 스캔한 QR이 현재 토큰과 같으며 만료 전인지 확인한다.
      *
      * @param token 스캔한 QR UUID
-     * @param now 잠금 획득 후 확인한 UTC 시각
+     * @param now 잠금 획득 후 확인한 한국 시각
      * @throws CouponException 사용 불가, 미생성/교체된 토큰 또는 QR 만료인 경우
      */
-    public void requireValidQr(UUID token, Instant now) {
+    public void requireValidQr(UUID token, LocalDateTime now) {
         requireUsable(now);
         if (qrToken == null
                 || !qrToken.equals(token)
@@ -145,10 +144,10 @@ public class UserCoupon {
     /**
      * 미사용 쿠폰의 시간 경과를 조회 응답에만 반영한다. 엔티티와 DB는 변경하지 않는다.
      *
-     * @param now 조회 기준 UTC 시각
+     * @param now 조회 기준 한국 시각
      * @return ISSUED이면서 사용 종료 이상이면 EXPIRED, 그 외 저장된 상태
      */
-    public UserCouponStatus effectiveStatus(Instant now) {
+    public UserCouponStatus effectiveStatus(LocalDateTime now) {
         return status == UserCouponStatus.ISSUED && !now.isBefore(usableEndTime)
                 ? UserCouponStatus.EXPIRED
                 : status;

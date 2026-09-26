@@ -69,8 +69,8 @@ class SchemaMigrationTests {
                 assertThat(result.getString("campaign_status")).isEqualTo("ACTIVE");
                 assertThat(result.getString("event_status")).isEqualTo("ACTIVE");
                 assertThat(result.getInt("coupon_quantity")).isEqualTo(1);
-                assertThat(result.getTimestamp("issue_start_at").toLocalDateTime())
-                        .isEqualTo(java.time.LocalDateTime.of(2026, 9, 24, 2, 0));
+                assertThat(result.getObject("issue_start_at", java.time.LocalDateTime.class))
+                        .isEqualTo(java.time.LocalDateTime.of(2026, 9, 24, 11, 0));
                 assertThat(result.next()).isFalse();
             }
             try (ResultSet result =

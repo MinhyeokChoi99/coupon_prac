@@ -4,8 +4,7 @@ import jakarta.persistence.*;
 
 import lombok.*;
 
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
+import java.time.LocalDateTime;
 
 /** 쿠폰을 사용한 결과와 실제 할인액. userCouponId 유니크 제약으로 쿠폰당 최대 한 건만 존재한다. */
 @Entity
@@ -28,28 +27,28 @@ public class CouponUsageHistory {
     @Column(nullable = false)
     private int discountAmount;
 
-    /** 행 생성 UTC 시각. DATETIME 정밀도에 맞춰 초 단위로 저장한다. */
+    /** 행 생성 한국 시각. Java 원본 정밀도를 유지하며 DB DATETIME 저장은 기본 정밀도 처리에 맡긴다. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant createdAt;
+    private LocalDateTime createdAt;
 
-    /** 마지막 변경 UTC 시각. */
+    /** 마지막 변경 한국 시각. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant updatedAt;
+    private LocalDateTime updatedAt;
 
     /**
      * 실제 할인액과 사용 시각을 기록할 엔티티를 만든다. 쿠폰 사용 전환과 함께 저장한다.
      *
      * @param userCouponId 사용 완료한 사용자 쿠폰 ID; UNIQUE 제약으로 최대 한 건만 허용한다
      * @param amount 확정 할인 금액(원), 0 이상
-     * @param now 실제 사용 UTC 시각; 생성·수정 시각에 초 단위로 저장한다
+     * @param now 실제 사용 한국 시각; 생성·수정 시각에 그대로 기록한다
      * @return 아직 저장되지 않은 사용 기록
      */
-    public static CouponUsageHistory used(Long userCouponId, int amount, Instant now) {
+    public static CouponUsageHistory used(Long userCouponId, int amount, LocalDateTime now) {
         CouponUsageHistory history = new CouponUsageHistory();
         history.userCouponId = userCouponId;
         history.discountAmount = amount;
-        history.createdAt = now.truncatedTo(ChronoUnit.SECONDS);
-        history.updatedAt = now.truncatedTo(ChronoUnit.SECONDS);
+        history.createdAt = now;
+        history.updatedAt = now;
         return history;
     }
 }

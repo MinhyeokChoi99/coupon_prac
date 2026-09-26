@@ -12,7 +12,7 @@ import java.util.Optional;
 /** 재고 조회와 쿠폰 한 행 단위의 동시성 제어를 제공한다. */
 public interface CouponInventoryRepository extends JpaRepository<CouponInventory, Long> {
     /**
-     * 커밋된 재고의 존재를 비잠금 조회한다. 발급 실패 롤백 후 AVAILABLE이 남으면 잠금 경합으로 해석한다.
+     * 재고의 존재를 비잠금 조회한다. 발급 트랜잭션에서는 일일 한도 쓰기 전 이미 소진된 이벤트를 빠르게 품절로 판정한다.
      *
      * @param eventId 이벤트 ID
      * @param status 확인할 재고 상태

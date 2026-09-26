@@ -7,7 +7,7 @@ import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.*;
 import org.springframework.data.jpa.repository.*;
 
-import java.time.Instant;
+import java.time.LocalDateTime;
 import java.util.*;
 
 /** 사용자 소유 쿠폰의 조회, QR 잠금 및 조건부 사용 처리를 담당한다. */
@@ -73,7 +73,7 @@ public interface UserCouponRepository extends JpaRepository<UserCoupon, Long> {
      *
      * @param id 사용자 쿠폰 ID
      * @param token UUID 토큰을 변환한 16바이트 값
-     * @param now 잠금 획득 후 확인한 현재 UTC 시각
+     * @param now 잠금 획득 후 확인한 현재 한국 시각
      * @return 사용 처리에 성공하면 1, 조건이 일치하지 않으면 0
      */
     @Modifying(flushAutomatically = true, clearAutomatically = true)
@@ -85,5 +85,5 @@ public interface UserCouponRepository extends JpaRepository<UserCoupon, Long> {
                       AND usable_start_time <= :now AND usable_end_time > :now AND qr_expires_at > :now
                     """,
             nativeQuery = true)
-    int consume(Long id, byte[] token, Instant now);
+    int consume(Long id, byte[] token, LocalDateTime now);
 }

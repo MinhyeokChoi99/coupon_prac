@@ -1,6 +1,6 @@
 package io.github.minhyeok.coupon_prac.v1.coupon.dto;
 
-import java.time.Instant;
+import java.time.LocalDateTime;
 import java.util.UUID;
 
 /**
@@ -8,6 +8,6 @@ import java.util.UUID;
  *
  * @param qrToken 현재 유효한 난수 UUID
  * @param qrVersion 최초 생성 시 1, 교체마다 증가하는 버전
- * @param expiresAt UTC 만료 시각; 이 시각부터 사용할 수 없다
+ * @param expiresAt 한국 만료 시각; 이 시각부터 사용할 수 없다
  */
-public record QrResult(UUID qrToken, int qrVersion, Instant expiresAt) {}
+public record QrResult(UUID qrToken, int qrVersion, LocalDateTime expiresAt) {}

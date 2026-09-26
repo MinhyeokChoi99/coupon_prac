@@ -16,7 +16,7 @@ public class CouponExceptionHandler {
      * 쿠폰 업무 예외를 정의된 HTTP 상태와 오류 JSON으로 변환한다.
      *
      * @param exception 서비스 또는 엔티티에서 발생한 업무 예외
-     * @return 코드·메시지·UTC 응답 시각이 포함된 HTTP 응답
+     * @return 코드·메시지·한국 응답 시각이 포함된 HTTP 응답
      */
     @ExceptionHandler(CouponException.class)
     public ResponseEntity<ErrorResponse> handleCouponException(CouponException exception) {

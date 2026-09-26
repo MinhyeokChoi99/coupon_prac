@@ -23,7 +23,6 @@ import org.testcontainers.junit.jupiter.*;
 import java.net.URI;
 import java.net.http.*;
 import java.time.*;
-import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.stream.IntStream;
@@ -65,9 +64,10 @@ class CouponServiceIntegrationTests {
     }
 
     @Test
-    void validatesCurrentSchemaAndUtcSession() {
+    void validatesCurrentSchemaAndKoreanSession() {
+        assertThat(ZoneId.systemDefault()).isEqualTo(ZoneId.of("Asia/Seoul"));
         assertThat(jdbc.queryForObject("SELECT @@session.time_zone", String.class))
-                .isEqualTo("+00:00");
+                .isEqualTo("+09:00");
         assertThat(
                         jdbc.queryForObject(
                                 """
@@ -84,6 +84,55 @@ class CouponServiceIntegrationTests {
                                 """,
                                 Integer.class))
                 .isZero();
+    }
+
+    @Test
+    void persistsKoreanLocalDateTimeWithoutJdbcOffsetConversion() {
+        LocalDateTime fixed = LocalDateTime.of(2026, 9, 25, 11, 0, 0);
+        User user = users.saveAndFlush(User.active("korean-time-roundtrip", fixed));
+        assertThat(users.findById(user.getId()).orElseThrow().getCreatedAt()).isEqualTo(fixed);
+        assertThat(
+                        jdbc.queryForObject(
+                                "SELECT CAST(created_at AS CHAR) FROM `user` WHERE id = ?",
+                                String.class,
+                                user.getId()))
+                .isEqualTo("2026-09-25 11:00:00");
+        assertThat(jdbc.queryForObject("SELECT NOW()", LocalDateTime.class))
+                .isBetween(
+                        LocalDateTime.now().minusSeconds(10), LocalDateTime.now().plusSeconds(10));
+    }
+
+    @Test
+    void preservesJavaFractionsButDatabaseStoresWholeSeconds() {
+        LocalDateTime original = LocalDateTime.of(2026, 9, 25, 11, 0, 0, 987654321);
+        User user = User.active("fractional-time", original);
+        assertThat(user.getCreatedAt()).isEqualTo(original);
+        users.saveAndFlush(user);
+        assertThat(user.getCreatedAt()).isEqualTo(original);
+        assertDatabaseSecond(users.findById(user.getId()).orElseThrow().getCreatedAt(), original);
+    }
+
+    @Test
+    void documentsAcceptedMidnightRoundingWithDefaultDatabaseSettings() {
+        long user = user();
+        LocalDateTime lastNanosecond = LocalDateTime.of(2026, 9, 25, 23, 59, 59, 999999999);
+        TransactionTemplate transaction = new TransactionTemplate(manager);
+        transaction.executeWithoutResult(
+                status -> {
+                    limits.createIfAbsent(user, lastNanosecond);
+                    assertThat(
+                                    limits.incrementIfBelowLimit(
+                                            user, lastNanosecond.toLocalDate(), lastNanosecond))
+                            .isZero();
+                });
+        // Known practice-project tradeoff: the driver/DB can round the creation date into tomorrow.
+        UserCouponDailyLimit tomorrow =
+                limits.findByUserIdAndLimitDate(user, lastNanosecond.toLocalDate().plusDays(1))
+                        .orElseThrow();
+        assertThat(tomorrow.getCreatedAt())
+                .isEqualTo(lastNanosecond.toLocalDate().plusDays(1).atStartOfDay());
+        assertThat(tomorrow.getIssuedCount()).isZero();
+        assertThat(limits.findByUserIdAndLimitDate(user, lastNanosecond.toLocalDate())).isEmpty();
     }
 
     @Test
@@ -112,17 +161,17 @@ class CouponServiceIntegrationTests {
         CouponEvent first =
                 service.prepareEvent(
                         c.getId(),
-                        Instant.now().atZone(ZoneId.of("Asia/Seoul")).toLocalDate(),
+                        LocalDateTime.now().toLocalDate(),
                         LocalTime.of(11, 0),
                         LocalTime.of(13, 0),
-                        Instant.now());
+                        LocalDateTime.now());
         CouponEvent repeated =
                 service.prepareEvent(
                         c.getId(),
                         first.getBusinessDate(),
                         LocalTime.of(11, 0),
                         LocalTime.of(13, 0),
-                        Instant.now());
+                        LocalDateTime.now());
         assertThat(repeated.getId()).isEqualTo(first.getId());
         assertThat(inventory.countByEventId(first.getId())).isEqualTo(5);
         assertThat(
@@ -145,10 +194,10 @@ class CouponServiceIntegrationTests {
                     CouponEvent event =
                             service.prepareEvent(
                                     campaign.getId(),
-                                    Instant.now().atZone(ZoneId.of("Asia/Seoul")).toLocalDate(),
+                                    LocalDateTime.now().toLocalDate(),
                                     LocalTime.of(11, 0),
                                     LocalTime.of(13, 0),
-                                    Instant.now());
+                                    LocalDateTime.now());
                     assertThat(inventory.countByEventId(event.getId())).isEqualTo(3);
                     status.setRollbackOnly();
                 });
@@ -158,7 +207,7 @@ class CouponServiceIntegrationTests {
     }
 
     @Test
-    void issuanceCommitsIndependentlyOfCallerTransaction() {
+    void issuanceParticipatesInCallerTransaction() {
         CouponEvent event = activeEvent(1);
         long user = user();
         TransactionTemplate callerTransaction = new TransactionTemplate(manager);
@@ -170,28 +219,23 @@ class CouponServiceIntegrationTests {
                             return issued;
                         });
         assertThat(result).isNotNull();
-        assertThat(coupons.findById(result.userCouponId())).isPresent();
+        assertThat(coupons.findById(result.userCouponId())).isEmpty();
         assertThat(inventory.countByEventIdAndStatus(event.getId(), CouponInventoryStatus.ISSUED))
-                .isEqualTo(1);
-        assertThat(
-                        limits.findByUserIdAndLimitDate(
-                                        user,
-                                        Instant.now().atZone(ZoneId.of("Asia/Seoul")).toLocalDate())
-                                .orElseThrow()
-                                .getIssuedCount())
-                .isEqualTo(1);
+                .isZero();
+        assertThat(limits.findByUserIdAndLimitDate(user, LocalDateTime.now().toLocalDate()))
+                .isEmpty();
     }
 
     @Test
     void preloadedActiveEventStillChecksIssueTime() {
         Campaign campaign = campaign(1, "AMOUNT", 1000, null, null);
-        Instant now = Instant.now().truncatedTo(ChronoUnit.SECONDS);
-        Instant start = now.plusSeconds(3600);
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime start = now.plusSeconds(3600);
         CouponEvent event =
                 events.saveAndFlush(
                         CouponEvent.active(
                                 campaign.getId(),
-                                start.atZone(ZoneId.of("Asia/Seoul")).toLocalDate(),
+                                start.toLocalDate(),
                                 1,
                                 start,
                                 start.plusSeconds(3600),
@@ -207,7 +251,7 @@ class CouponServiceIntegrationTests {
         assertCode(() -> issue(event, user), CouponErrorCode.EVENT_NOT_ISSUABLE);
         jdbc.update(
                 "UPDATE coupon_event SET issue_start_at = ? WHERE id = ?",
-                LocalDateTime.ofInstant(now.minusSeconds(60), ZoneOffset.UTC),
+                now.minusSeconds(60),
                 event.getId());
         assertThat(issue(event, user).userCouponId()).isNotNull();
     }
@@ -217,7 +261,10 @@ class CouponServiceIntegrationTests {
         CouponEvent event = activeEvent(2);
         long user = user();
         CouponIssueResult first = issue(event, user);
-        assertThat(issue(event, user)).isEqualTo(first);
+        CouponIssueResult repeated = issue(event, user);
+        assertThat(repeated.userCouponId()).isEqualTo(first.userCouponId());
+        assertThat(repeated.couponCode()).isEqualTo(first.couponCode());
+        assertDatabaseSecond(repeated.issuedAt(), first.issuedAt());
         UserCoupon stored = coupons.findById(first.userCouponId()).orElseThrow();
         assertThat(stored.getCouponCode()).isEqualTo(UUID.fromString(first.couponCode()));
         assertThat(stored.getQrVersion()).isZero();
@@ -230,9 +277,7 @@ class CouponServiceIntegrationTests {
                                 first.userCouponId()))
                 .isEqualTo(16);
         assertThat(
-                        limits.findByUserIdAndLimitDate(
-                                        user,
-                                        Instant.now().atZone(ZoneId.of("Asia/Seoul")).toLocalDate())
+                        limits.findByUserIdAndLimitDate(user, LocalDateTime.now().toLocalDate())
                                 .orElseThrow()
                                 .getIssuedCount())
                 .isEqualTo(1);
@@ -253,13 +298,12 @@ class CouponServiceIntegrationTests {
     @Test
     void soldOutAttemptDoesNotConsumeDailyLimit() {
         CouponEvent event = activeEvent(1);
-        issue(event, user());
+        long firstUser = user();
+        CouponIssueResult issued = issue(event, firstUser);
+        assertThat(issue(event, firstUser).userCouponId()).isEqualTo(issued.userCouponId());
         long nextUser = user();
         assertCode(() -> issue(event, nextUser), CouponErrorCode.COUPON_SOLD_OUT);
-        assertThat(
-                        limits.findByUserIdAndLimitDate(
-                                nextUser,
-                                Instant.now().atZone(ZoneId.of("Asia/Seoul")).toLocalDate()))
+        assertThat(limits.findByUserIdAndLimitDate(nextUser, LocalDateTime.now().toLocalDate()))
                 .isEmpty();
     }
 
@@ -282,9 +326,7 @@ class CouponServiceIntegrationTests {
                         inventory.countByEventIdAndStatus(
                                 event.getId(), CouponInventoryStatus.AVAILABLE))
                 .isEqualTo(1);
-        assertThat(
-                        limits.findByUserIdAndLimitDate(
-                                user, Instant.now().atZone(ZoneId.of("Asia/Seoul")).toLocalDate()))
+        assertThat(limits.findByUserIdAndLimitDate(user, LocalDateTime.now().toLocalDate()))
                 .isEmpty();
     }
 
@@ -370,9 +412,7 @@ class CouponServiceIntegrationTests {
                         .toList();
         assertThat(new HashSet<>(parallel(tasks))).hasSize(1);
         assertThat(
-                        limits.findByUserIdAndLimitDate(
-                                        user,
-                                        Instant.now().atZone(ZoneId.of("Asia/Seoul")).toLocalDate())
+                        limits.findByUserIdAndLimitDate(user, LocalDateTime.now().toLocalDate())
                                 .orElseThrow()
                                 .getIssuedCount())
                 .isEqualTo(1);
@@ -405,10 +445,10 @@ class CouponServiceIntegrationTests {
     }
 
     @Test
-    void countsEachKoreanDateEvenWhenUtcDateIsSame() {
+    void countsEachKoreanDateAcrossMidnight() {
         long user = user();
-        Instant beforeMidnight = Instant.parse("2026-09-23T14:59:59Z");
-        Instant afterMidnight = Instant.parse("2026-09-23T15:00:00Z");
+        LocalDateTime beforeMidnight = LocalDateTime.parse("2026-09-23T23:59:59");
+        LocalDateTime afterMidnight = LocalDateTime.parse("2026-09-24T00:00:00");
         TransactionTemplate transaction = new TransactionTemplate(manager);
         transaction.executeWithoutResult(
                 tx -> {
@@ -416,29 +456,17 @@ class CouponServiceIntegrationTests {
                     for (int count = 0; count < 3; count++) {
                         assertThat(
                                         limits.incrementIfBelowLimit(
-                                                user,
-                                                beforeMidnight
-                                                        .atZone(ZoneId.of("Asia/Seoul"))
-                                                        .toLocalDate(),
-                                                beforeMidnight))
+                                                user, beforeMidnight.toLocalDate(), beforeMidnight))
                                 .isEqualTo(1);
                     }
                     assertThat(
                                     limits.incrementIfBelowLimit(
-                                            user,
-                                            beforeMidnight
-                                                    .atZone(ZoneId.of("Asia/Seoul"))
-                                                    .toLocalDate(),
-                                            beforeMidnight))
+                                            user, beforeMidnight.toLocalDate(), beforeMidnight))
                             .isZero();
                     limits.createIfAbsent(user, afterMidnight);
                     assertThat(
                                     limits.incrementIfBelowLimit(
-                                            user,
-                                            afterMidnight
-                                                    .atZone(ZoneId.of("Asia/Seoul"))
-                                                    .toLocalDate(),
-                                            afterMidnight))
+                                            user, afterMidnight.toLocalDate(), afterMidnight))
                             .isEqualTo(1);
                 });
         assertThat(
@@ -461,9 +489,9 @@ class CouponServiceIntegrationTests {
                 () -> service.rotateQr(coupon.userCouponId(), user()),
                 CouponErrorCode.COUPON_NOT_FOUND);
         QrResult first = service.rotateQr(coupon.userCouponId(), user);
-        Instant beforeRotation = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+        LocalDateTime beforeRotation = LocalDateTime.now();
         QrResult second = service.rotateQr(coupon.userCouponId(), user);
-        Instant afterRotation = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+        LocalDateTime afterRotation = LocalDateTime.now();
         assertThat(second.qrToken()).isNotEqualTo(first.qrToken());
         assertThat(second.qrVersion()).isEqualTo(2);
         assertThat(second.expiresAt())
@@ -482,12 +510,12 @@ class CouponServiceIntegrationTests {
         assertThat(history.countByUserCouponId(coupon.userCouponId())).isEqualTo(1);
         assertThat(coupons.findById(coupon.userCouponId()).orElseThrow().getStatus())
                 .isEqualTo(UserCouponStatus.USED);
-        assertThat(service.detail(coupon.userCouponId(), user).usedAt()).isEqualTo(result.usedAt());
+        assertDatabaseSecond(service.detail(coupon.userCouponId(), user).usedAt(), result.usedAt());
         assertThatThrownBy(
                         () ->
                                 history.saveAndFlush(
                                         CouponUsageHistory.used(
-                                                coupon.userCouponId(), 1000, Instant.now())))
+                                                coupon.userCouponId(), 1000, LocalDateTime.now())))
                 .isInstanceOf(DataIntegrityViolationException.class);
     }
 
@@ -497,13 +525,14 @@ class CouponServiceIntegrationTests {
         CouponIssueResult coupon = issue(activeEvent(1), user);
         QrResult qr = service.rotateQr(coupon.userCouponId(), user);
         UserCoupon stored = coupons.findById(coupon.userCouponId()).orElseThrow();
-        stored.requireValidQr(qr.qrToken(), qr.expiresAt().minusNanos(1));
+        assertDatabaseSecond(stored.getQrExpiresAt(), qr.expiresAt());
+        stored.requireValidQr(qr.qrToken(), stored.getQrExpiresAt().minusNanos(1));
         assertCode(
-                () -> stored.requireValidQr(qr.qrToken(), qr.expiresAt()),
+                () -> stored.requireValidQr(qr.qrToken(), stored.getQrExpiresAt()),
                 CouponErrorCode.INVALID_QR);
         jdbc.update(
                 "UPDATE user_coupon SET qr_expires_at = ? WHERE id = ?",
-                LocalDateTime.ofInstant(Instant.now().minusSeconds(1), ZoneOffset.UTC),
+                LocalDateTime.now().minusSeconds(1),
                 coupon.userCouponId());
         assertCode(
                 () -> service.use(qr.qrToken(), 1L, 2L, 10_000, null, null),
@@ -517,18 +546,20 @@ class CouponServiceIntegrationTests {
         CouponEvent event = activeEvent(1);
         long user = user();
         CouponIssueResult coupon = issue(event, user);
-        Instant useEnd = Instant.now().truncatedTo(ChronoUnit.SECONDS).plusSeconds(30);
+        LocalDateTime useEnd = LocalDateTime.now().plusSeconds(30);
         jdbc.update(
                 "UPDATE user_coupon SET usable_end_time = ? WHERE id = ?",
-                LocalDateTime.ofInstant(useEnd, ZoneOffset.UTC),
+                useEnd,
                 coupon.userCouponId());
         QrResult qr = service.rotateQr(coupon.userCouponId(), user);
-        assertThat(qr.expiresAt()).isEqualTo(useEnd);
+        assertDatabaseSecond(qr.expiresAt(), useEnd);
         UserCoupon stored = coupons.findById(coupon.userCouponId()).orElseThrow();
-        assertCode(() -> stored.requireUsable(useEnd), CouponErrorCode.COUPON_NOT_USABLE);
+        assertCode(
+                () -> stored.requireUsable(stored.getUsableEndTime()),
+                CouponErrorCode.COUPON_NOT_USABLE);
         jdbc.update(
                 "UPDATE user_coupon SET usable_end_time = ? WHERE id = ?",
-                LocalDateTime.ofInstant(Instant.now().minusSeconds(1), ZoneOffset.UTC),
+                LocalDateTime.now().minusSeconds(1),
                 coupon.userCouponId());
         assertCode(
                 () -> service.use(qr.qrToken(), 1L, 2L, 10_000, null, null),
@@ -601,12 +632,22 @@ class CouponServiceIntegrationTests {
         assertThat(issued.statusCode()).isEqualTo(201);
         UserCoupon coupon = coupons.findByEventIdAndUserId(event.getId(), user).orElseThrow();
         assertThat(issued.body()).contains(coupon.getCouponCode().toString());
-        assertThat(
-                        post(
-                                        "/api/v1/coupon-events/" + event.getId() + "/coupons",
-                                        "{\"userId\":" + user + "}")
-                                .body())
-                .isEqualTo(issued.body());
+        java.util.regex.Matcher issuedAt =
+                java.util.regex.Pattern.compile("\"issuedAt\":\"([^\"]+)\"").matcher(issued.body());
+        assertThat(issuedAt.find()).isTrue();
+        assertDatabaseSecond(coupon.getCreatedAt(), LocalDateTime.parse(issuedAt.group(1)));
+        HttpResponse<String> repeated =
+                post(
+                        "/api/v1/coupon-events/" + event.getId() + "/coupons",
+                        "{\"userId\":" + user + "}");
+        assertThat(repeated.statusCode()).isEqualTo(201);
+        assertThat(repeated.body())
+                .contains("\"userCouponId\":" + coupon.getId(), coupon.getCouponCode().toString());
+        java.util.regex.Matcher repeatedIssuedAt =
+                java.util.regex.Pattern.compile("\"issuedAt\":\"([^\"]+)\"")
+                        .matcher(repeated.body());
+        assertThat(repeatedIssuedAt.find()).isTrue();
+        assertThat(LocalDateTime.parse(repeatedIssuedAt.group(1))).isEqualTo(coupon.getCreatedAt());
         assertThat(
                         post(
                                         "/api/v1/user-coupons/" + coupon.getId() + "/qr",
@@ -649,7 +690,7 @@ class CouponServiceIntegrationTests {
     }
 
     private long user() {
-        return users.saveAndFlush(CouponUser.active(UUID.randomUUID().toString(), Instant.now()))
+        return users.saveAndFlush(User.active(UUID.randomUUID().toString(), LocalDateTime.now()))
                 .getId();
     }
 
@@ -661,15 +702,15 @@ class CouponServiceIntegrationTests {
                         qty,
                         LocalTime.of(11, 0),
                         LocalTime.of(14, 0),
-                        Instant.now().atZone(ZoneId.of("Asia/Seoul")).toLocalDate(),
-                        Instant.now().atZone(ZoneId.of("Asia/Seoul")).toLocalDate().plusDays(1),
+                        LocalDateTime.now().toLocalDate(),
+                        LocalDateTime.now().toLocalDate().plusDays(1),
                         type,
                         value,
                         menuId,
                         minimum,
                         10000,
                         null,
-                        Instant.now()));
+                        LocalDateTime.now()));
     }
 
     private CouponEvent activeEvent(int qty) {
@@ -677,12 +718,12 @@ class CouponServiceIntegrationTests {
     }
 
     private CouponEvent activate(Campaign campaign) {
-        Instant now = Instant.now();
+        LocalDateTime now = LocalDateTime.now();
         CouponEvent event =
                 events.saveAndFlush(
                         CouponEvent.active(
                                 campaign.getId(),
-                                now.atZone(ZoneId.of("Asia/Seoul")).toLocalDate(),
+                                now.toLocalDate(),
                                 campaign.getIssueQuantity(),
                                 now.minusSeconds(60),
                                 now.plusSeconds(600),
@@ -691,6 +732,12 @@ class CouponServiceIntegrationTests {
                                 now));
         service.loadInventory(event.getId(), now);
         return event;
+    }
+
+    /** DB 재조회 값은 초 단위다. 기본 정밀도 처리에 따른 1초 미만 오차는 허용한다. */
+    private void assertDatabaseSecond(LocalDateTime stored, LocalDateTime original) {
+        assertThat(stored.getNano()).isZero();
+        assertThat(Duration.between(original, stored).abs()).isLessThan(Duration.ofSeconds(1));
     }
 
     private CouponIssueResult issue(CouponEvent event, long user) {

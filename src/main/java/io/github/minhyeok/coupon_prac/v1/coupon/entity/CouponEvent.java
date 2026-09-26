@@ -5,7 +5,6 @@ import jakarta.persistence.*;
 import lombok.*;
 
 import java.time.*;
-import java.time.temporal.ChronoUnit;
 
 /** 캠페인의 영업일별 쿠폰 행사. ACTIVE 상태로 미리 적재하고 발급 시작·종료 시각으로 요청을 허용한다. */
 @Entity
@@ -32,34 +31,34 @@ public class CouponEvent {
     @Column(nullable = false)
     private int couponQuantity;
 
-    /** 발급 시작 UTC 시각. ACTIVE 상태여도 이 시각 전에는 발급하지 않는다. */
+    /** 발급 시작 한국 시각. ACTIVE 상태여도 이 시각 전에는 발급하지 않는다. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant issueStartAt;
+    private LocalDateTime issueStartAt;
 
-    /** 발급 종료 UTC 시각. 이 시각부터 발급하지 않는다. */
+    /** 발급 종료 한국 시각. 이 시각부터 발급하지 않는다. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant issueEndAt;
+    private LocalDateTime issueEndAt;
 
-    /** 쿠폰 사용 가능 시작. 캠페인은 일일 시각, 이벤트·쿠폰은 UTC 시각을 저장한다. */
+    /** 쿠폰 사용 가능 시작. 캠페인은 일일 시각, 이벤트·쿠폰은 한국 시각을 저장한다. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant usableStartTime;
+    private LocalDateTime usableStartTime;
 
     /** 쿠폰 사용 가능 종료. 이 시각부터는 사용할 수 없다. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant usableEndTime;
+    private LocalDateTime usableEndTime;
 
     /** 해당 도메인의 현재 상태. */
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private CouponEventStatus status;
 
-    /** 행 생성 UTC 시각. DATETIME 정밀도에 맞춰 초 단위로 저장한다. */
+    /** 행 생성 한국 시각. Java 원본 정밀도를 유지하며 DB DATETIME 저장은 기본 정밀도 처리에 맡긴다. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant createdAt;
+    private LocalDateTime createdAt;
 
-    /** 마지막 변경 UTC 시각. */
+    /** 마지막 변경 한국 시각. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant updatedAt;
+    private LocalDateTime updatedAt;
 
     /**
      * 일별 수량과 발급·사용 기간을 검증해 ACTIVE 이벤트를 만든다. 재고와 같은 트랜잭션에서 저장해야 한다.
@@ -67,11 +66,11 @@ public class CouponEvent {
      * @param campaignId 원본 캠페인 ID
      * @param date 이벤트를 구분하는 한국 영업일
      * @param quantity 전체 쿠폰 수량, 1 이상
-     * @param issueStart 발급 시작 UTC 시각(포함)
-     * @param issueEnd 발급 종료 UTC 시각(미포함); 사용 종료 이하여야 한다
-     * @param usableStart 사용 시작 UTC 시각(포함)
-     * @param usableEnd 사용 종료 UTC 시각(미포함)
-     * @param now 생성·수정 UTC 시각; 저장 시각은 초 단위로 절삭한다
+     * @param issueStart 발급 시작 한국 시각(포함)
+     * @param issueEnd 발급 종료 한국 시각(미포함); 사용 종료 이하여야 한다
+     * @param usableStart 사용 시작 한국 시각(포함)
+     * @param usableEnd 사용 종료 한국 시각(미포함)
+     * @param now 생성·수정 한국 시각; Java에서는 소수점 이하도 그대로 유지한다
      * @return 아직 저장되지 않은 ACTIVE 이벤트
      * @throws IllegalArgumentException 수량 또는 시작/종료 기간이 유효하지 않은 경우
      */
@@ -79,11 +78,11 @@ public class CouponEvent {
             Long campaignId,
             LocalDate date,
             int quantity,
-            Instant issueStart,
-            Instant issueEnd,
-            Instant usableStart,
-            Instant usableEnd,
-            Instant now) {
+            LocalDateTime issueStart,
+            LocalDateTime issueEnd,
+            LocalDateTime usableStart,
+            LocalDateTime usableEnd,
+            LocalDateTime now) {
         if (quantity <= 0
                 || !issueStart.isBefore(issueEnd)
                 || !usableStart.isBefore(usableEnd)
@@ -93,23 +92,23 @@ public class CouponEvent {
         event.campaignId = campaignId;
         event.businessDate = date;
         event.couponQuantity = quantity;
-        event.issueStartAt = issueStart.truncatedTo(ChronoUnit.SECONDS);
-        event.issueEndAt = issueEnd.truncatedTo(ChronoUnit.SECONDS);
-        event.usableStartTime = usableStart.truncatedTo(ChronoUnit.SECONDS);
-        event.usableEndTime = usableEnd.truncatedTo(ChronoUnit.SECONDS);
+        event.issueStartAt = issueStart;
+        event.issueEndAt = issueEnd;
+        event.usableStartTime = usableStart;
+        event.usableEndTime = usableEnd;
         event.status = CouponEventStatus.ACTIVE;
-        event.createdAt = now.truncatedTo(ChronoUnit.SECONDS);
-        event.updatedAt = now.truncatedTo(ChronoUnit.SECONDS);
+        event.createdAt = now;
+        event.updatedAt = now;
         return event;
     }
 
     /**
      * ACTIVE이며 발급 시작 이상·종료 미만인지 판정한다. 잔여 재고는 확인하지 않는다.
      *
-     * @param now 검사 기준 UTC 시각
+     * @param now 검사 기준 한국 시각
      * @return 상태와 기간 조건을 만족하면 true
      */
-    public boolean isIssuableAt(Instant now) {
+    public boolean isIssuableAt(LocalDateTime now) {
         return status == CouponEventStatus.ACTIVE
                 && !now.isBefore(issueStartAt)
                 && now.isBefore(issueEndAt);

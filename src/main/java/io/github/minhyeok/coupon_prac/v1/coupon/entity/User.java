@@ -4,16 +4,15 @@ import jakarta.persistence.*;
 
 import lombok.*;
 
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
+import java.time.LocalDateTime;
 
 /** 외부 공급자 식별자와 계정 상태를 보관하는 쿠폰 사용자. */
 @Entity
 @Table(name = "`user`")
 @Getter
-public class CouponUser {
+public class User {
     /** JPA가 조회한 행을 엔티티로 복원할 때 사용하는 기본 생성자. 직접 생성할 때는 제공된 생성 메서드를 사용한다. */
-    protected CouponUser() {}
+    protected User() {}
 
     /** 테이블의 숫자 기본키. */
     @Id
@@ -28,27 +27,27 @@ public class CouponUser {
     @Column(nullable = false, length = 20)
     private String status;
 
-    /** 행 생성 UTC 시각. DATETIME 정밀도에 맞춰 초 단위로 저장한다. */
+    /** 행 생성 한국 시각. Java 원본 정밀도를 유지하며 DB DATETIME 저장은 기본 정밀도 처리에 맡긴다. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant createdAt;
+    private LocalDateTime createdAt;
 
-    /** 마지막 변경 UTC 시각. */
+    /** 마지막 변경 한국 시각. */
     @Column(nullable = false, columnDefinition = "DATETIME")
-    private Instant updatedAt;
+    private LocalDateTime updatedAt;
 
     /**
      * 외부 공급자 식별자로 ACTIVE 사용자를 만든다. 중복 식별자는 DB UNIQUE 제약으로 차단한다.
      *
      * @param providerUserId 외부 로그인 공급자의 고유 식별자
-     * @param now 계정 생성·수정 UTC 시각
+     * @param now 계정 생성·수정 한국 시각
      * @return 아직 저장되지 않은 ACTIVE 사용자
      */
-    public static CouponUser active(String providerUserId, Instant now) {
-        CouponUser user = new CouponUser();
+    public static User active(String providerUserId, LocalDateTime now) {
+        User user = new User();
         user.providerUserId = providerUserId;
         user.status = "ACTIVE";
-        user.createdAt = now.truncatedTo(ChronoUnit.SECONDS);
-        user.updatedAt = now.truncatedTo(ChronoUnit.SECONDS);
+        user.createdAt = now;
+        user.updatedAt = now;
         return user;
     }
 

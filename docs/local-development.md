@@ -29,6 +29,11 @@ MANAGEMENT_ADDRESS=0.0.0.0 ./gradlew bootRun
 ```
 
 앱은 DB에 미리 적재한 이벤트·재고를 사용한다. 예약 실행 프로필이나 자동 데이터 생성은 없다.
+현재 시각은 `LocalDateTime.now()`이며 `bootRun`은 JVM 시간대를 `Asia/Seoul`로 지정한다.
+IDE는 한국 OS/JVM 기본 시간대를 사용하거나 VM 옵션 `-Duser.timezone=Asia/Seoul`을 지정한다.
+MySQL 연결 시간대는 `+09:00`이며 DB DATETIME과 API 응답은 한국 시각이다. 응답에는 `Z`가 붙지 않는다.
+Java는 원본 `LocalDateTime`을 전달하고 JDBC·MySQL의 기본 소수점 처리로 `DATETIME`에 저장한다.
+별도 반올림 방지 설정은 사용하지 않는다. 연습용으로 초·날짜 경계 오차를 감수하며 자정 직전 한도 판정이 어긋날 수 있다.
 캠페인·이벤트 상태와 발급·사용 기간을 확인한 뒤 API를 실행한다. [적재 SQL 설명](current-coupon-erd.md#1-쿠폰-적재-흐름)
 부하테스트 데이터는 앱 시작 후 k6가 적재하고 종료 시 검증·삭제한다. [k6 실행 안내](load-testing.md)
 
@@ -58,6 +63,7 @@ docker compose down
 
 ## JPA와 통합 테스트
 
-JPA는 `ddl-auto: validate`를 사용하고, Flyway가 `src/main/resources/db/migration`의 SQL로 스키마를 관리한다. 현재 7개 테이블을 검증한다. V1~V3는 기존 이력, V4는 예약 상태 제거용 전환이다.
+JPA는 `ddl-auto: validate`를 사용하고, Flyway가 `src/main/resources/db/migration`의 SQL로 스키마를 관리한다. 현재 7개 테이블을 검증한다. V1~V3는 기존 이력, V4는 예약 상태 제거, V5는 UTC 데이터의 한국 시각 전환이다.
+V5 배포 전 API·k6 쓰기를 중단하고 백업한다. [전환 및 부분 실패 주의사항](v1/README.md#한국-시간-저장으로-전환-v5)
 
 `./gradlew test`는 Testcontainers의 독립 MySQL를 사용한다. Compose의 로컬 데이터베이스를 수정하지 않는다.

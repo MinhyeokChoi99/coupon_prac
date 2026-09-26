@@ -41,7 +41,7 @@ v2 코드는 아직 없으며, `docs/v14-*`, `docs/v21-*`는 별도 도메인 �
 | campaign / Campaign | 가게·점주·할인 조건·매일 적용할 시간·기간 | ACTIVE 캠페인만 신규 발급 허용 |
 | coupon_event / CouponEvent | 캠페인의 특정 날짜 행사·수량·발급/사용 시각 | 캠페인·영업일 조합은 하나 |
 | coupon_inventory / CouponInventory | 아직 배정되지 않았거나 발급된 쿠폰 한 장 | 이벤트·순번 및 쿠폰 코드 유일 |
-| user / CouponUser | 사용자 외부 식별자·활성 상태 | 활성 사용자에게만 신규 발급 |
+| user / User | 사용자 외부 식별자·활성 상태 | 활성 사용자에게만 신규 발급 |
 | coupon_daily_limit / UserCouponDailyLimit | 사용자별 한국 날짜 발급 횟수 | 사용자·날짜 유일, 하루 최대 3장 |
 | user_coupon / UserCoupon | 특정 사용자에게 발급된 쿠폰·QR·사용 기간 | 같은 이벤트에서 사용자당 한 장 |
 | coupon_usage_history / CouponUsageHistory | 쿠폰 사용 시각·실제 할인액 | user_coupon_id 유일: 쿠폰 1 : 기록 0..1 |
@@ -49,7 +49,7 @@ v2 코드는 아직 없으며, `docs/v14-*`, `docs/v21-*`는 별도 도메인 �
 ID는 `BIGINT AUTO_INCREMENT`, 쿠폰 코드·QR 토큰은 `BINARY(16)`이다.
 UUID는 API에서 문자열로 전달하고 Java에서 `UUID`로 다룬다. 현재 QR은 원본 난수 UUID 저장 방식이며 SHA-256 해시는 사용하지 않는다.
 `user_coupon`의 `(event_id, coupon_code)`는 실제 재고를 참조하는 복합 FK다.
-발급 횟수 날짜 `limit_date`는 `DATE(created_at + INTERVAL 9 HOUR)` 생성 컬럼이다.
+발급 횟수 날짜 `limit_date`는 `DATE(created_at)` 생성 컬럼이다. 생성 시각 자체가 한국 시각이다.
 다음 날에는 새 한도 행을 만들며 어제 행의 생성 시각을 덮어쓰지 않는다.
 
 ## 3. API와 서비스 메서드
@@ -75,7 +75,7 @@ UUID는 API에서 문자열로 전달하고 Java에서 `UUID`로 다룬다. 현�
 
 1. 캠페인은 미리 저장되어 있어야 한다.
 2. `prepareEvent(campaignId, date, issueStart, issueEnd, now)`가 캠페인을 잠근다.
-3. 해당 영업일 이벤트가 없으면 ACTIVE로 생성한다. 한국 영업일과 시각을 결합해 UTC로 저장한다.
+3. 해당 영업일 이벤트가 없으면 ACTIVE로 생성한다. 한국 영업일과 시각을 결합해 그대로 저장한다.
 4. `loadInventory(eventId, now)`가 이벤트를 잠그고 순번 1~100, UUID, AVAILABLE 재고를 생성한다.
 5. 이벤트와 재고를 한 번에 커밋한다. 중간 실패는 모두 롤백한다.
 
@@ -101,10 +101,10 @@ SELECT COUNT(*) FROM coupon_inventory WHERE event_id = :eventId;
 
 `issue(new IssueCouponCommand(eventId, userId))`를 호출한다.
 
-1. 같은 이벤트·사용자의 쿠폰이 이미 있으면 그 쿠폰을 반환한다. 재고와 한도를 다시 차감하지 않는다.
-2. 신규 발급은 독립 READ_COMMITTED 트랜잭션을 시작한다.
+1. 먼저 사용자 행을 `FOR UPDATE`로 잠근다. 같은 이벤트·사용자의 쿠폰이 이미 있으면 그 쿠폰을 반환한다. 재고와 한도를 다시 차감하지 않는다.
+2. 신규 발급은 기본 `@Transactional` 하나에서 처리한다. 호출자가 트랜잭션을 열지 않았다면 서비스가 새 트랜잭션을 열고, 이미 열었다면 그 트랜잭션에 참여한다.
 3. 활성 사용자인지 확인하고 오늘 한도 행을 INSERT 또는 잠근다.
-4. 잠금 대기 중 다른 요청이 발급했을 수 있으므로 기존 쿠폰을 다시 확인한다.
+4. 같은 사용자 요청은 사용자 행 잠금으로 직렬화되어 있으므로, 한도 행 처리 뒤 기존 쿠폰을 다시 확인한다.
 5. 한국 날짜가 바뀌지 않았는지, 이벤트·캠페인이 ACTIVE이고 발급 시간 안인지 검사한다.
 6. 오늘 횟수가 3 미만일 때만 1 증가시킨다.
 7. 잠기지 않은 AVAILABLE 재고 한 행을 선점한다. 잠금 후 날짜·발급 기간을 재확인한다.
@@ -126,18 +126,20 @@ LIMIT 1 FOR UPDATE SKIP LOCKED;
 -- 선택한 재고 UPDATE + user_coupon INSERT 후 COMMIT
 ```
 
-선점할 행이 없으면 한도 증가도 롤백한다. **롤백 후** AVAILABLE 행의 존재를 비잠금 조회한다.
-있으면 `INVENTORY_BUSY`, 없으면 `COUPON_SOLD_OUT`이다. 정상 발급마다 재고 전체 COUNT를 수행하지 않는다.
+일일 한도 증가 뒤 선점할 행이 없으면 한도 증가도 롤백하고 `INVENTORY_BUSY`를 반환한다. 다른 요청이 재고 행을 잠근 순간일 수 있으므로
+그 시점에 같은 트랜잭션에서 품절로 단정하지 않는다. 한도 증가 전 AVAILABLE 재고가 없는 것이 확인되면 `COUPON_SOLD_OUT`을 반환한다.
+정상 발급마다 재고 전체 COUNT를 수행하지 않는다.
 이 판정은 조회 시점의 상태이며, 이벤트 상태를 SOLD_OUT으로 저장하거나 도메인 이벤트를 발행하지는 않는다.
 순번은 선점 후보 정렬 기준이지 커밋 완료 순서가 아니다. 마지막 순번 발급만으로 전체 발급 완료를 판단하지 않는다.
 
-### 왜 서비스 하나인데 TransactionTemplate을 쓰는가?
+### 왜 기본 `@Transactional`만 쓰는가?
 
-한 서비스 안의 메서드를 직접 호출하면 내부 메서드의 `@Transactional`만으로 새 트랜잭션을 열 수 없다.
-발급 실패 롤백과 품절 확인의 순서를 확실하게 분리하려고 `issue()`는 NOT_SUPPORTED,
-실제 발급은 `TransactionTemplate`의 REQUIRES_NEW + READ_COMMITTED로 실행한다.
-호출자의 트랜잭션이 있어도 일시 중단하며, 발급이 완료되면 독립적으로 커밋된다.
-따라서 외부 작업과 발급을 함께 롤백해야 하는 유스케이스에는 이 메서드를 그대로 조합하면 안 된다.
+발급에 필요한 조회와 쓰기를 `issue()` 한 메서드에 두었으므로, 별도 `TransactionTemplate`이나 트랜잭션 전파 설정이 필요 없다.
+이 방식은 코드 흐름을 단순하게 하고 DB 연결도 한 트랜잭션에서 사용한다. 다만 상위 서비스가 트랜잭션을 열어 `issue()`를 호출하면,
+발급 결과도 상위 작업과 함께 커밋 또는 롤백된다. 발급만 반드시 독립 커밋해야 한다는 요구가 생길 때에만 별도의 공개 서비스와 `REQUIRES_NEW`를 검토한다.
+MySQL 기본 `REPEATABLE_READ`에서 동시 동일 요청의 오래된 읽기 스냅샷을 피하기 위해, 첫 일반 조회 전에 항상 존재하는 사용자 행을
+`SELECT ... FOR UPDATE`로 잠근다. 같은 사용자 요청은 순서대로 실행되므로, 뒤 요청의 첫 일반 조회는 앞 요청이 커밋한 쿠폰을 보고
+새 INSERT 대신 멱등 응답을 반환한다. 서로 다른 사용자는 서로 잠그지 않는다.
 
 다른 공개 메서드는 일반 `@Transactional`을 사용한다. `prepareEvent` 내부의 `loadInventory`는
 이미 열린 적재 트랜잭션에 참여하며, 별도 커밋이 필요하지 않다.
@@ -149,7 +151,7 @@ LIMIT 1 FOR UPDATE SKIP LOCKED;
 1. 쿠폰 ID와 소유 사용자 ID로 쿠폰을 잠근다.
 2. ISSUED 상태 및 사용 가능한 기간인지 확인한다.
 3. 새 난수 UUID로 `qr_token`을 교체하고 `qr_version`을 1 증가시킨다.
-4. 만료는 `현재 초 단위 시각 + 60초`와 `쿠폰 사용 종료 시각` 중 빠른 값으로 저장한다.
+4. 만료는 `현재 시각 + 60초`와 `쿠폰 사용 종료 시각` 중 빠른 값으로 계산한다. DB 저장 정밀도는 초 단위다.
 
 최초 쿠폰은 버전 0, 토큰과 QR 만료는 null이다. 새 토큰 저장 후 이전 토큰으로는 조회되지 않는다.
 클라이언트가 QR 교체 API를 호출해야 새 토큰이 생긴다. 서버가 60초마다 자동 교체하지 않으며,
@@ -197,7 +199,13 @@ SELECT * FROM coupon_usage_history WHERE user_coupon_id = :id;
 
 ## 8. 시간·제약과 현재 범위
 
-- 저장 시간은 UTC DATETIME(초 단위), 영업일·일일 한도는 Asia/Seoul 기준이다.
+- 시간 필드는 Java `LocalDateTime`, DB `DATETIME`(초 단위)이며 모두 한국 시각이다. 영업일·일일 한도도 한국 날짜다.
+- Java에서 `truncatedTo`로 자르지 않고 원본을 저장한다. JDBC·MySQL의 소수점 처리도 별도로 설정하지 않고 기본 동작을 사용한다.
+- 연습 프로젝트에서는 반올림으로 초·날짜 경계가 바뀌는 오차를 감수한다. 자정 직전 생성 시각이 다음 날로 저장되면 일일 한도 조회·집계가 어긋나거나 발급이 거절될 수 있다. 운영용 정확성을 보장하는 정책은 아니다.
+- 저장 직후 응답에는 원본 소수점 이하가 남을 수 있고 목록·상세·발급 재요청 등 DB 재조회 응답에는 남지 않는다. 발급 멱등성은 같은 쿠폰 ID·코드를 보장하며 시각 문자열의 소수점 자리까지 같음을 보장하지 않는다.
+- QR의 실제 만료 판정은 DB에 저장된 초 단위 만료 시각을 따른다. 반올림으로 최초 응답의 표시 시각과 1초 미만 차이가 날 수 있다.
+- 현재 시각은 `LocalDateTime.now()`로 얻는다. `bootRun`과 테스트는 JVM 기본 시간대를 Asia/Seoul로 지정한다. IDE/JAR 실행 환경도 한국 시간대여야 한다.
+- JSON 시각에는 `Z`나 오프셋이 붙지 않는다(예: `2026-09-25T11:00:00`). API 시각은 한국 시각이라는 계약이며 클라이언트가 추가로 9시간을 더하면 안 된다.
 - 캠페인 TIME은 한국 현지 시각이며 이벤트에서 날짜를 결합한다. 종료가 시작 이하이면 다음 날 종료다.
 - DB 스키마의 원본은 Flyway SQL이다. JPA는 `ddl-auto: validate`로 검증만 한다.
 - Flyway V1/V2는 과거 이력 번호다. 애플리케이션 패키지 v1/v2와 관계없다.
@@ -206,12 +214,36 @@ SELECT * FROM coupon_usage_history WHERE user_coupon_id = :id;
 - 가게·점주·메뉴 관리, 노출 타기팅, 예산 차감, 품절 이벤트/outbox, 삭제·취소 API는 미구현이다.
 - 발급 후 할인 조건은 변경하지 않는 전제다. 수정 허용 시 발급 당시 조건을 별도 저장해야 한다.
 
+### 한국 시간 저장으로 전환 (V5)
+
+V5 이전 DB의 DATETIME은 UTC 값이다. V5는 7개 테이블의 생성·수정·발급·사용·QR 만료 DATETIME에 9시간을 한 번 더한다.
+기존에 한국 기준이던 DATE(영업일·캠페인 기간), TIME(캠페인 시간대), UUID·상태·수량은 바꾸지 않는다.
+한도 생성 컬럼은 `DATE(created_at)`으로 바꾸므로 전환 전후 한국 한도 날짜와 발급 횟수는 동일하다.
+변환 중 임시 날짜 중복을 피하려고 한도 유니크 키를 잠시 제거했다 복원하며 사용자 FK용 인덱스는 유지한다.
+
+1. API 인스턴스와 k6 등 모든 DB 쓰기 작업을 중단하고 V4 상태 DB를 백업한다.
+2. 새 버전 앱 하나로 Flyway V5를 적용한다. 구버전 앱과 동시에 실행하지 않는다.
+3. 한도 날짜·쿠폰 시간·QR 만료를 확인한 뒤 새 버전만 실행한다.
+
+MySQL DDL 때문에 V5 전체는 단일 원자적 트랜잭션이 아니다. 부분 실패 시 이미 변환된 값에 9시간을 다시 더하면 안 된다.
+실패했다면 백업 복원 후 다시 적용한다. Flyway 이력을 지우고 SQL을 무조건 재실행하지 않는다.
+새로운 빈 테스트 DB도 V1~V5 순서로 구성한다.
+현재 로컬 개발 DB에 전환이 적용됐는지는 앱 시작 시 Flyway 이력으로 확인한다. 코드 수정만으로 DB가 변환되지는 않는다.
+
 ## 9. 실행·검증·부하테스트
 
 ```sh
 docker compose up -d
 MANAGEMENT_ADDRESS=0.0.0.0 ./gradlew bootRun
 ```
+
+IDE의 JVM 기본 시간대가 이미 한국이면 추가 설정은 필요 없다. 다른 환경에서 JAR를 실행할 때는 명시한다.
+
+```sh
+java -Duser.timezone=Asia/Seoul -jar build/libs/coupon_prac-0.0.1-SNAPSHOT.jar
+```
+
+MySQL 연결은 `+09:00`, Hibernate JDBC 시간대는 `Asia/Seoul`로 맞췄다. Compose MySQL 기본 시간대도 `+09:00`이다.
 
 앱 시작으로 데이터는 생기지 않는다. 마이그레이션 완료 후 테스트 전용 DB에서 k6로 적재한다.
 
@@ -231,4 +263,5 @@ node --test loadtest/k6/v1/fixture.test.mjs
 
 통합 테스트 `CouponServiceIntegrationTests`는 별도 MySQL Testcontainers에서 재고·동시 발급·한도·QR·사용·조회와
 단일 서비스의 트랜잭션 경계를 검증한다. `SchemaMigrationTests`는 마이그레이션 전환을 검증한다.
+`KoreanDateTimeMigrationTests`는 기존 UTC 데이터 보존·자정 경계·한도 날짜·QR null·한 번만 변환되는지를 검사한다.
 로컬 개발 DB를 초기화하지 않는다. 생성된 Java API 문서는 `build/docs/javadoc/index.html`에서 확인한다.

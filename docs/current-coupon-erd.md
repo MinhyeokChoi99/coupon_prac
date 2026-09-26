@@ -2,7 +2,7 @@
 
 ![현재 쿠폰 ERD](assets/current-coupon-erd.png)
 
-기준 이미지는 `쿠우폰 (9).png`다. 아래는 저장소 코드와 V4까지의 마이그레이션에 맞춘 설명이다.
+기준 이미지는 `쿠우폰 (9).png`다. 아래는 저장소 코드와 V5까지의 마이그레이션에 맞춘 설명이다.
 패키지·서비스 메서드·API 대응은 [v1 구현 안내](v1/README.md)를 참고한다.
 SQL은 실행 순서를 이해하기 위한 형태이며, 실제 JPA SQL은 컬럼 나열과 별칭이 다를 수 있다.
 `:userId` 같은 값은 바인딩 파라미터다.
@@ -16,7 +16,7 @@ SQL은 실행 순서를 이해하기 위한 형태이며, 실제 JPA SQL은 컬�
 - 같은 이벤트에서 사용자당 한 장, 전체 이벤트를 합쳐 한국 날짜 기준 하루 최대 3장이다.
 - 쿠폰 코드와 QR 토큰은 Java `UUID.randomUUID()`로 만들고 MySQL `BINARY(16)`에 저장한다. API에서는 UUID 문자열로 반환한다.
 - `coupon_code`는 쿠폰의 고정 식별자다. `qr_token`은 재발급할 때마다 바뀌는 60초짜리 사용 권한이다.
-- `DATETIME`은 UTC로 저장한다. 영업일과 일일 한도는 한국 날짜로 계산한다. 예: 한국 11:00 → DB 02:00.
+- `LocalDateTime`과 `DATETIME` 모두 한국 시각으로 저장한다. 예: 한국 11:00 → DB 11:00. JVM 기본 시간대도 한국이어야 한다.
 - 발급 후 캠페인 할인 조건·가게는 변경하지 않는 정책이다. 현재 코드에는 수정 API가 없다. 향후 변경을 허용하려면 발급 당시 조건을 별도 보관해야 한다.
 
 ### 이미지에서 보완한 부분
@@ -34,7 +34,10 @@ SQL은 실행 순서를 이해하기 위한 형태이며, 실제 JPA SQL은 컬�
 
 ### 테이블과 필드가 필요한 이유
 
-모든 `id`는 `BIGINT AUTO_INCREMENT` PK다. `created_at`은 생성 시각, `updated_at`은 마지막 변경 시각이며 서버가 초 단위로 입력한다.
+모든 `id`는 `BIGINT AUTO_INCREMENT` PK다. `created_at`은 생성 시각, `updated_at`은 마지막 변경 시각이다.
+Java는 `LocalDateTime.now()`를 그대로 전달한다. JDBC·MySQL 기본 동작에 따라 `DATETIME` 초 단위로 저장하며,
+DB 재조회 값의 나노초는 0이다. 저장 직후 Java 객체의 소수점 이하 값은 그대로 남을 수 있다.
+연습용 정책으로 반올림에 따른 초·날짜 경계 오차를 감수한다. 자정 직전에는 생성 시각에서 계산한 한도 날짜와 요청 날짜가 다를 수 있다.
 
 | 테이블 | 필드 | 역할 |
 | --- | --- | --- |
@@ -50,8 +53,8 @@ SQL은 실행 순서를 이해하기 위한 형태이며, 실제 JPA SQL은 컬�
 | campaign | start_date, end_date, created_at | 캠페인 기간과 생성 시각 |
 | coupon_event | campaign_id, business_date | 어느 캠페인의 어느 날짜 행사인지 |
 | coupon_event | coupon_quantity | 해당 날짜에 확정한 전체 수량. 남은 수량이 아님 |
-| coupon_event | issue_start_at, issue_end_at | 발급 시작·종료 UTC 시각 |
-| coupon_event | usable_start_time, usable_end_time | 날짜까지 포함한 사용 가능 UTC 시각 |
+| coupon_event | issue_start_at, issue_end_at | 발급 시작·종료 한국 시각 |
+| coupon_event | usable_start_time, usable_end_time | 날짜까지 포함한 사용 가능 한국 시각 |
 | coupon_event | status, created_at, updated_at | 이벤트 상태와 변경 이력 시각 |
 | coupon_inventory | event_id, sequence_no | 이벤트와 적재 순번 |
 | coupon_inventory | coupon_code | 미리 만들어 둔 쿠폰 UUID |
@@ -99,7 +102,7 @@ coupon_usage_history: 아직 없음
 
 예: 한국 날짜 9월 23일, 발급 시간 11:00~13:00.
 이 서비스는 명시적으로 호출하는 사전 적재 도구이며 앱 시작 시 실행되지 않는다.
-캠페인의 사용 시간이 11:00~14:00이면 날짜와 결합하고 UTC로 변환해 저장한다.
+캠페인의 사용 시간이 11:00~14:00이면 한국 날짜와 결합해 그대로 저장한다.
 사용 종료 시간이 시작 시간보다 이르거나 같으면 다음 날 종료하는 것으로 처리한다.
 
 앱은 DB에 미리 적재된 데이터를 사용하며, 스케줄링 설정과 자동 상태 전환을 사용하지 않는다.
@@ -156,7 +159,7 @@ Java는 UUID를 16바이트로 직접 바인딩하므로 실제 SQL에서 `UUID_
 
 10시 59분에 ACTIVE 데이터가 이미 있어도 발급은 11시부터 가능하다.
 발급 서비스는 `status=ACTIVE AND issue_start_at <= 현재시각 < issue_end_at`을 검사한다.
-현재 시각은 `Instant.now()`로 직접 확인하며, 잠금 대기 후에도 다시 확인한다.
+현재 시각은 한국 JVM 시간대의 `LocalDateTime.now()`로 직접 확인하며, 잠금 대기 후에도 다시 확인한다.
 
 ## 2. 쿠폰 발급 흐름
 
@@ -170,7 +173,7 @@ API: `POST /api/v1/coupon-events/{eventId}/coupons`
 
 ```text
 사용자 7이 이벤트 501의 쿠폰을 요청
-  → 이미 받은 쿠폰이 있으면 같은 결과 반환
+  → 이미 받은 쿠폰이 있으면 같은 쿠폰 반환(재조회 시각은 DB 초 단위)
   → 사용자 7의 오늘 한도 행 잠금
   → 중복 발급·이벤트·발급 시각 확인
   → issued_count + 1
@@ -188,31 +191,33 @@ API: `POST /api/v1/coupon-events/{eventId}/coupons`
 
 ```sql
 limit_date DATE GENERATED ALWAYS AS
-    (DATE(created_at + INTERVAL 9 HOUR)) STORED
+    (DATE(created_at)) STORED
 ```
 
-예: UTC `2026-09-23 15:00:00`에 생성된 행의 한국 날짜는 `2026-09-24`다.
+예: 한국 시각 `2026-09-24 00:00:00`에 생성된 행의 한도 날짜는 `2026-09-24`다. 별도로 9시간을 더하지 않는다.
 `created_at`은 처음 만든 후 바꾸지 않는다. 사용자·날짜 유니크 제약으로 하루 한 행만 생긴다.
 
 ### 2-3. 실제 실행 순서
 
-발급 트랜잭션은 **READ COMMITTED**다. 같은 사용자 요청이 앞선 트랜잭션을 기다린 후, 최신 커밋된 쿠폰을 확인할 수 있다.
+발급은 기본 `@Transactional` 하나로 처리한다. 호출자가 이미 트랜잭션을 열었다면 그 트랜잭션에 참여하고, 그렇지 않으면 `issue()`가 새 트랜잭션을 연다.
 
 ```sql
+START TRANSACTION;
+
+-- 같은 사용자의 동시 발급만 직렬화한다.
+SELECT * FROM `user` WHERE id = :userId FOR UPDATE;
+
 -- 빠른 멱등 응답: 이미 발급되었으면 재고와 한도에 손대지 않는다.
 SELECT * FROM user_coupon WHERE event_id = :eventId AND user_id = :userId;
 
--- 없으면 발급 트랜잭션 시작
-START TRANSACTION;
-
-SELECT * FROM `user` WHERE id = :userId;
 -- ACTIVE 사용자만 진행한다.
 
 INSERT INTO coupon_daily_limit (user_id, issued_count, created_at, updated_at)
 VALUES (:userId, 0, :nowUtc, :nowUtc)
 ON DUPLICATE KEY UPDATE id = id;
 
--- 앞선 동일 사용자 요청이 끝난 뒤 다시 확인한다.
+-- 같은 사용자의 다른 요청은 사용자 행 잠금에서 대기했다가,
+-- 첫 일반 조회에서 먼저 커밋된 쿠폰을 확인해 반환한다.
 SELECT * FROM user_coupon WHERE event_id = :eventId AND user_id = :userId;
 -- 이미 있으면 증가 없이 기존 결과를 반환한다.
 
@@ -253,18 +258,11 @@ COMMIT;
 
 `SKIP LOCKED`는 다른 요청이 잠근 행을 건너뛴다. 따라서 조회 0건만으로 품절이라고 판단하지 않는다.
 
-재고를 못 찾으면 먼저 발급 트랜잭션을 롤백한 뒤, 새 조회로 다음을 확인한다.
+일일 한도 증가 뒤 재고를 못 찾으면 트랜잭션 전체를 롤백하고 `INVENTORY_BUSY`(409)를 반환한다. 다른 요청이 모든 AVAILABLE 행을
+잠근 순간일 수 있으므로 같은 트랜잭션 안에서 품절로 단정하지 않는다. 반대로 한도 증가 전의 비잠금 조회에서 AVAILABLE 재고가 없으면
+`COUPON_SOLD_OUT`(409)을 반환한다.
 
-```sql
-SELECT id FROM coupon_inventory
-WHERE event_id = :eventId AND status = 'AVAILABLE'
-LIMIT 1;
-```
-
-- AVAILABLE이 남아 있으면 `INVENTORY_BUSY`(409): 처리 중인 요청이 있으므로 잠시 후 재시도한다.
-- AVAILABLE이 없으면 `COUPON_SOLD_OUT`(409): 현재 커밋된 데이터 기준으로 재고가 없다.
-
-이 조회는 **재고 선점 실패 때만** 실행하며, 모든 발급마다 전체 COUNT를 수행하지 않는다.
+모든 발급마다 재고 전체 COUNT를 수행하지 않는다.
 시퀀스 마지막 번호를 발급했다고 전체 완료로 판단하지도 않는다.
 현재는 오류 응답만 구분한다. `SOLD_OUT` 상태 전환, Redis, 도메인 이벤트, Outbox는 아직 구현하지 않았다.
 
@@ -385,7 +383,8 @@ SELECT * FROM coupon_usage_history WHERE user_coupon_id = :couponId;
 
 - V3 마이그레이션은 승인받은 **연습·부하테스트용 기존 4개 테이블 데이터를 삭제**하고 새 7개 테이블을 만든다. 실데이터 환경에 적용하면 안 된다.
 - V1/V2는 이미 적용된 Flyway 체크섬을 유지하기 위해 수정하지 않았다.
-- [부하테스트](load-testing.md)는 k6가 테스트 DB에 캠페인 30개·이벤트 30개·재고 15,000개·사용자 50,000명을 적재하고, HTTP 부하·DB 검증·실행별 정리를 수행한다. 앱에는 부하테스트 전용 코드가 없다.
+- [부하테스트](load-testing.md)는 기본값으로 테스트 DB에 캠페인 10개·이벤트 10개·재고 5,000개·고유 사용자 10,000명을 적재하고, 사용자당 한 번씩 약 10,000회 HTTP 요청·DB 검증·실행별 정리를 수행한다. 앱에는 부하테스트 전용 코드가 없다.
 - V4는 과거 SCHEDULED 상태를 ACTIVE로 변환한다. V1~V3 파일은 적용 이력과 체크섬 유지를 위해 그대로 둔다.
+- V5는 기존 UTC DATETIME 값에 9시간을 더하고 한도 날짜를 `DATE(created_at)`으로 변경한다. 배포 전 쓰기를 중단하고 백업해야 한다. [전환 절차](v1/README.md#한국-시간-저장으로-전환-v5)
 - 현재 API는 연습용으로 userId·ownerId를 요청에서 받는다. **인증·인가가 구현된 서비스가 아니다.** 실서비스에서는 로그인 정보로 ID를 결정하고, 주문 금액도 서버의 주문/POS 데이터에서 가져와야 한다.
 - 가게·점주·메뉴 CRUD, 타깃 노출·포인트 차감, 품절 도메인 이벤트, 취소·환불 처리는 범위 밖이다.

@@ -3,7 +3,9 @@ name: coupon-prac
 services:
   mysql:
     image: mysql:8.4
+    command: ["--default-time-zone=+09:00"]
     environment:
+      TZ: Asia/Seoul
       MYSQL_DATABASE: coupon
       MYSQL_USER: coupon
       MYSQL_PASSWORD: coupon
@@ -68,17 +70,18 @@ services:
     environment:
       BASE_URL: ${LOAD_TEST_BASE_URL:-http://host.docker.internal:8080}
       K6_TEST_ID: ${K6_TEST_ID:-coupon-${K6_VERSION:-v1}}
-      K6_MAX_RPS: ${K6_MAX_RPS:-2000}
-      K6_RAMP_DURATION: ${K6_RAMP_DURATION:-60s}
-      K6_PRE_ALLOCATED_VUS: ${K6_PRE_ALLOCATED_VUS:-1000}
-      K6_MAX_VUS: ${K6_MAX_VUS:-3000}
+      K6_MAX_RPS: ${K6_MAX_RPS:-500}
+      K6_RAMP_DURATION: ${K6_RAMP_DURATION:-40s}
+      K6_PRE_ALLOCATED_VUS: ${K6_PRE_ALLOCATED_VUS:-200}
+      K6_MAX_VUS: ${K6_MAX_VUS:-600}
       K6_ALLOW_DB_WRITES: ${K6_ALLOW_DB_WRITES:-0}
       K6_DB_DSN: ${K6_DB_DSN:-coupon:coupon@tcp(mysql:3306)/coupon?timeout=5s&readTimeout=30s&writeTimeout=30s}
       K6_MODE: ${K6_MODE:-run}
+      K6_DEFER_VERIFICATION: ${K6_DEFER_VERIFICATION:-false}
       K6_RUN_ID: ${K6_RUN_ID:-}
-      K6_EVENT_COUNT: ${K6_EVENT_COUNT:-30}
+      K6_EVENT_COUNT: ${K6_EVENT_COUNT:-10}
       K6_COUPONS_PER_EVENT: ${K6_COUPONS_PER_EVENT:-500}
-      K6_USER_COUNT: ${K6_USER_COUNT:-50000}
+      K6_USER_COUNT: ${K6_USER_COUNT:-10000}
       K6_VALID_SECONDS: ${K6_VALID_SECONDS:-3600}
       K6_REQUIRE_SOLD_OUT: ${K6_REQUIRE_SOLD_OUT:-true}
       K6_PROMETHEUS_RW_SERVER_URL: http://prometheus:9090/api/v1/write

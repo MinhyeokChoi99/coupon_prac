@@ -7,7 +7,7 @@ spring:
     username: ${DB_USERNAME:coupon}
     password: ${DB_PASSWORD:coupon}
     hikari:
-      connection-init-sql: "SET time_zone = '+00:00'"
+      connection-init-sql: "SET time_zone = '+09:00'"
 
   jpa:
     open-in-view: false
@@ -16,7 +16,7 @@ spring:
     properties:
       hibernate:
         jdbc:
-          time_zone: UTC
+          time_zone: Asia/Seoul
 
 management:
   server:

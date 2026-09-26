@@ -7,21 +7,16 @@ import io.github.minhyeok.coupon_prac.v1.coupon.repository.*;
 
 import org.springframework.data.domain.*;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.TransactionDefinition;
-import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.ByteBuffer;
 import java.time.*;
-import java.time.temporal.ChronoUnit;
 import java.util.*;
 
 /**
  * v1 쿠폰의 수동 적재, 발급, QR 교체, 1회 사용, 조회를 담당하는 단일 서비스.
  *
- * <p>재고는 한 행씩 잠그며 공용 잔여 수량 카운터를 갱신하지 않는다. 발급만 명시적 트랜잭션으로 실행하여 실패 시 롤백이 완료된 뒤 실제 품절을 확인한다.
+ * <p>재고는 한 행씩 잠그며 공용 잔여 수량 카운터를 갱신하지 않는다. 발급은 조회부터 재고 선점과 사용자 쿠폰 생성까지 하나의 기본 트랜잭션으로 처리한다.
  */
 @Service
 public class CouponService {
@@ -46,11 +41,8 @@ public class CouponService {
     /** 1회 사용 기록 저장소. */
     private final CouponUsageHistoryRepository history;
 
-    /** 독립 커밋·롤백을 보장하는 READ_COMMITTED 발급 트랜잭션. */
-    private final TransactionTemplate issuanceTransaction;
-
     /**
-     * 테이블별 저장소와 READ_COMMITTED 발급 트랜잭션을 준비한다.
+     * 테이블별 저장소를 준비한다.
      *
      * @param campaigns 할인 조건 및 캠페인 잠금 저장소
      * @param events 날짜별 이벤트 조회 및 적재 잠금 저장소
@@ -59,7 +51,6 @@ public class CouponService {
      * @param limits 한국 날짜 기준 일일 발급 한도 저장소
      * @param coupons 발급 쿠폰, QR, 소유권 조회 저장소
      * @param history 쿠폰당 최대 한 건의 사용 기록 저장소
-     * @param transactionManager 발급 작업의 독립 커밋·롤백을 수행할 JPA 트랜잭션 관리자
      */
     public CouponService(
             CampaignRepository campaigns,
@@ -68,8 +59,7 @@ public class CouponService {
             CouponUserRepository users,
             UserCouponDailyLimitRepository limits,
             UserCouponRepository coupons,
-            CouponUsageHistoryRepository history,
-            PlatformTransactionManager transactionManager) {
+            CouponUsageHistoryRepository history) {
         this.campaigns = campaigns;
         this.events = events;
         this.inventory = inventory;
@@ -77,10 +67,6 @@ public class CouponService {
         this.limits = limits;
         this.coupons = coupons;
         this.history = history;
-        this.issuanceTransaction = new TransactionTemplate(transactionManager);
-        this.issuanceTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
-        this.issuanceTransaction.setPropagationBehavior(
-                TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     /**
@@ -93,7 +79,7 @@ public class CouponService {
      * @param date 캠페인 시작일~종료일 안에 있는 한국 영업일
      * @param issueStart 한국 시간 기준 발급 시작 시각(포함)
      * @param issueEnd 한국 시간 기준 발급 종료 시각(미포함)
-     * @param now 생성·수정 시각으로 기록할 UTC 시각
+     * @param now 생성·수정 시각으로 기록할 한국 시각
      * @return 기존 또는 새로 저장된 이벤트; 재고까지 준비된 상태
      * @throws IllegalArgumentException 캠페인이 비활성이거나 영업일·기간·수량이 유효하지 않은 경우
      * @throws NoSuchElementException 캠페인 ID가 존재하지 않는 경우
@@ -105,7 +91,7 @@ public class CouponService {
             LocalDate date,
             LocalTime issueStart,
             LocalTime issueEnd,
-            Instant now) {
+            LocalDateTime now) {
         Campaign campaign = campaigns.lockById(campaignId).orElseThrow();
         if (!campaign.allowsIssuance()
                 || date.isBefore(campaign.getStartDate())
@@ -116,18 +102,12 @@ public class CouponService {
             loadInventory(existing.get().getId(), now);
             return existing.get();
         }
-        Instant useStart =
-                date.atTime(campaign.getUsableStartTime())
-                        .atZone(ZoneId.of("Asia/Seoul"))
-                        .toInstant();
+        LocalDateTime useStart = date.atTime(campaign.getUsableStartTime());
         LocalDate endDate =
                 campaign.getUsableEndTime().isAfter(campaign.getUsableStartTime())
                         ? date
                         : date.plusDays(1);
-        Instant useEnd =
-                endDate.atTime(campaign.getUsableEndTime())
-                        .atZone(ZoneId.of("Asia/Seoul"))
-                        .toInstant();
+        LocalDateTime useEnd = endDate.atTime(campaign.getUsableEndTime());
         LocalDate issueEndDate = issueEnd.isAfter(issueStart) ? date : date.plusDays(1);
         CouponEvent event =
                 events.saveAndFlush(
@@ -135,11 +115,8 @@ public class CouponService {
                                 campaignId,
                                 date,
                                 campaign.getIssueQuantity(),
-                                date.atTime(issueStart).atZone(ZoneId.of("Asia/Seoul")).toInstant(),
-                                issueEndDate
-                                        .atTime(issueEnd)
-                                        .atZone(ZoneId.of("Asia/Seoul"))
-                                        .toInstant(),
+                                date.atTime(issueStart),
+                                issueEndDate.atTime(issueEnd),
                                 useStart,
                                 useEnd,
                                 now));
@@ -154,11 +131,11 @@ public class CouponService {
      * 트랜잭션에 속하며 중간 flush는 커밋이 아니다. 앱 시작 시 자동 호출하지 않는다.
      *
      * @param eventId 재고를 준비할 이벤트 ID
-     * @param now 재고 생성·수정 시각으로 기록할 UTC 시각
+     * @param now 재고 생성·수정 시각으로 기록할 한국 시각
      * @throws CouponException 이벤트가 없거나 비활성/부분 적재 상태인 경우
      */
     @Transactional
-    public void loadInventory(Long eventId, Instant now) {
+    public void loadInventory(Long eventId, LocalDateTime now) {
         // Only preparation locks the event. Issuance never updates a shared quantity row.
         CouponEvent event =
                 events.lockById(eventId)
@@ -177,60 +154,32 @@ public class CouponService {
     }
 
     /**
-     * 사용자에게 이벤트의 쿠폰 한 장을 발급하고, 이미 발급했다면 같은 결과를 반환한다.
+     * 사용자에게 이벤트의 쿠폰 한 장을 발급하고, 이미 발급했다면 같은 쿠폰을 반환한다.
      *
-     * <p>호출자의 트랜잭션을 일시 중단하고 발급 작업을 READ_COMMITTED 독립 트랜잭션으로 실행한다. 재고 선점에 실패하면 롤백 완료 후 새 조회로 실제 품절과
-     * 잠금 경합을 구분한다. 이 메서드 전체에 일반 쓰기 트랜잭션을 걸거나 issueInTransaction을 직접 호출하면 이 경계가 깨진다.
+     * <p>기본 전파 방식인 REQUIRED 트랜잭션 하나에서 기존 쿠폰 조회, 사용자·이벤트 검증, 일일 한도 증가, 재고 행 선점과 사용자 쿠폰 생성을
+     * 처리한다. 호출자가 이미 트랜잭션을 열었다면 그 트랜잭션에 참여하고, 그렇지 않으면 이 메서드가 트랜잭션을 연다. 어느 단계든 실패하면 한도 증가·재고
+     * 상태·쿠폰 생성은 모두 롤백된다. SKIP LOCKED로 선점 가능한 행이 없으면 실제 품절 또는 다른 요청의 잠금 경합일 수 있으므로
+     * INVENTORY_BUSY를 반환한다.
      *
      * @param command 발급 대상 이벤트 ID와 사용자 ID; 동일 이벤트·사용자 조합은 멱등 처리
-     * @return DB에 커밋된 신규 쿠폰 또는 기존 쿠폰의 ID·UUID 문자열·UTC 발급 시각
+     * @return 신규 또는 기존 쿠폰의 ID·UUID 문자열·한국 발급 시각. 신규 발급은 메서드 반환 뒤 트랜잭션 커밋 시 확정된다
      * @throws CouponException 사용자/이벤트가 비활성, 발급 기간 밖, 일일 한도 초과, 실제 품절 또는 재고 잠금 경합인 경우
      */
-    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    @Transactional
     public CouponIssueResult issue(IssueCouponCommand command) {
-        Optional<UserCoupon> existing =
-                coupons.findByEventIdAndUserId(command.eventId(), command.userId());
-        if (existing.isPresent()) return issueResult(existing.get());
-        try {
-            return issuanceTransaction.execute(status -> issueInTransaction(command));
-        } catch (CouponException exception) {
-            if (exception.getErrorCode() != CouponErrorCode.INVENTORY_BUSY) throw exception;
-            // Consistent, non-locking read sees a locked-but-uncommitted row as AVAILABLE.
-            if (!inventory.existsByEventIdAndStatus(
-                    command.eventId(), CouponInventoryStatus.AVAILABLE))
-                throw new CouponException(CouponErrorCode.COUPON_SOLD_OUT);
-            throw exception;
-        }
-    }
-
-    /**
-     * 발급 트랜잭션 안에서 사용자·일일 한도·이벤트를 검사하고 재고 하나와 사용자 쿠폰을 함께 변경한다.
-     *
-     * <p>한도 행 잠금 이후 중복 발급을 다시 조회한다. 한도 증가 뒤 SKIP LOCKED로 AVAILABLE 재고를 선점하고 현재 시각을 다시 검사한다. 어느 단계든
-     * 실패하면 한도 증가·재고 상태·쿠폰 생성이 모두 롤백된다.
-     *
-     * @param command 동일 트랜잭션으로 확정할 이벤트·사용자 ID
-     * @return 커밋 직전의 발급 결과; 외부 issue가 트랜잭션 완료 후 반환한다
-     * @throws CouponException 자격·기간·날짜·한도·재고 조건을 만족하지 못한 경우
-     */
-    private CouponIssueResult issueInTransaction(IssueCouponCommand command) {
-        Optional<CouponUser> user = users.findById(command.userId());
-        if (user.isEmpty() || !user.get().isActive()) {
+        User user =
+                users.lockById(command.userId())
+                        .orElseThrow(() -> new CouponException(CouponErrorCode.USER_NOT_ACTIVE));
+        if (!user.isActive()) {
             throw new CouponException(CouponErrorCode.USER_NOT_ACTIVE);
         }
-        Instant now = Instant.now();
-        LocalDate date = now.atZone(ZoneId.of("Asia/Seoul")).toLocalDate();
-        limits.createIfAbsent(command.userId(), now.truncatedTo(ChronoUnit.SECONDS));
-
         Optional<UserCoupon> existing =
                 coupons.findByEventIdAndUserId(command.eventId(), command.userId());
         if (existing.isPresent()) {
             return issueResult(existing.get());
         }
-        now = Instant.now();
-        if (!now.atZone(ZoneId.of("Asia/Seoul")).toLocalDate().equals(date)) {
-            throw new CouponException(CouponErrorCode.INVENTORY_BUSY);
-        }
+        LocalDateTime now = LocalDateTime.now();
+        LocalDate date = now.toLocalDate();
         CouponEvent event =
                 events.findById(command.eventId())
                         .orElseThrow(() -> new CouponException(CouponErrorCode.EVENT_NOT_FOUND));
@@ -238,18 +187,32 @@ public class CouponService {
                 || !campaigns.findById(event.getCampaignId()).orElseThrow().allowsIssuance()) {
             throw new CouponException(CouponErrorCode.EVENT_NOT_ISSUABLE);
         }
-        if (limits.incrementIfBelowLimit(
-                        command.userId(), date, now.truncatedTo(ChronoUnit.SECONDS))
-                != 1) {
+        if (!inventory.existsByEventIdAndStatus(
+                command.eventId(), CouponInventoryStatus.AVAILABLE)) {
+            existing = coupons.findByEventIdAndUserId(command.eventId(), command.userId());
+            if (existing.isPresent()) {
+                return issueResult(existing.get());
+            }
+            throw new CouponException(CouponErrorCode.COUPON_SOLD_OUT);
+        }
+        limits.createIfAbsent(command.userId(), now);
+        existing = coupons.findByEventIdAndUserId(command.eventId(), command.userId());
+        if (existing.isPresent()) {
+            return issueResult(existing.get());
+        }
+        now = LocalDateTime.now();
+        if (!now.toLocalDate().equals(date)) {
+            throw new CouponException(CouponErrorCode.INVENTORY_BUSY);
+        }
+        if (limits.incrementIfBelowLimit(command.userId(), date, now) != 1) {
             throw new CouponException(CouponErrorCode.DAILY_ISSUANCE_LIMIT_EXCEEDED);
         }
         CouponInventory item =
                 inventory
                         .lockFirstAvailableByEventId(command.eventId())
                         .orElseThrow(() -> new CouponException(CouponErrorCode.INVENTORY_BUSY));
-        now = Instant.now();
-        if (!event.isIssuableAt(now)
-                || !now.atZone(ZoneId.of("Asia/Seoul")).toLocalDate().equals(date)) {
+        now = LocalDateTime.now();
+        if (!event.isIssuableAt(now) || !now.toLocalDate().equals(date)) {
             throw new CouponException(CouponErrorCode.EVENT_NOT_ISSUABLE);
         }
         item.issue(now);
@@ -257,10 +220,10 @@ public class CouponService {
     }
 
     /**
-     * 저장된 사용자 쿠폰을 발급 결과 DTO로 변환한다. 기존 발급 재응답에서도 원래 생성 시각을 유지한다.
+     * 사용자 쿠폰을 발급 결과 DTO로 변환한다. 신규 저장 객체는 소수점 이하를 포함할 수 있고 DB 재조회 객체는 초 단위다.
      *
      * @param coupon 신규 저장되었거나 멱등 조회로 가져온 사용자 쿠폰
-     * @return 쿠폰 ID, UUID 문자열, UTC 생성 시각
+     * @return 쿠폰 ID, UUID 문자열, 한국 생성 시각
      */
     private static CouponIssueResult issueResult(UserCoupon coupon) {
         return new CouponIssueResult(
@@ -270,12 +233,12 @@ public class CouponService {
     /**
      * 소유 쿠폰을 독점 잠그고 현재 QR 토큰을 새 난수 UUID로 교체한다.
      *
-     * <p>잠금 획득 후 현재 시각으로 미사용·사용 기간을 검사한다. 버전이 증가하고 이전 토큰은 즉시 무효다. 만료는 초 단위 현재 시각+60초와 쿠폰 사용 종료 중 빠른
+     * <p>잠금 획득 후 현재 시각으로 미사용·사용 기간을 검사한다. 버전이 증가하고 이전 토큰은 즉시 무효다. 만료는 현재 시각+60초와 쿠폰 사용 종료 중 빠른
      * 시각이다.
      *
      * @param couponId QR을 교체할 사용자 쿠폰 ID
      * @param userId 해당 쿠폰을 소유한 사용자 ID
-     * @return 새 QR 토큰·증가한 버전·UTC 만료 시각
+     * @return 새 QR 토큰·증가한 버전·한국 만료 시각
      * @throws CouponException 쿠폰이 없거나 다른 사용자 소유이거나 사용 가능한 상태/기간이 아닌 경우
      */
     @Transactional
@@ -283,7 +246,7 @@ public class CouponService {
         UserCoupon coupon =
                 coupons.lockOwned(couponId, userId)
                         .orElseThrow(() -> new CouponException(CouponErrorCode.COUPON_NOT_FOUND));
-        coupon.rotateQr(Instant.now());
+        coupon.rotateQr(LocalDateTime.now());
         return new QrResult(coupon.getQrToken(), coupon.getQrVersion(), coupon.getQrExpiresAt());
     }
 
@@ -299,7 +262,7 @@ public class CouponService {
      * @param orderAmount 전체 주문 금액(원), 0보다 커야 한다
      * @param menuId 특정 메뉴 할인 시 대상 메뉴 ID; 전체 할인에서는 null 허용
      * @param menuAmount 특정 메뉴 할인 시 해당 메뉴 금액(원); 전체 주문 금액 이하여야 하며 전체 할인에서는 null 허용
-     * @return 사용자 쿠폰 ID·사용 기록 ID·최종 할인액·UTC 사용 시각
+     * @return 사용자 쿠폰 ID·사용 기록 ID·최종 할인액·한국 사용 시각
      * @throws CouponException QR 만료/교체, 사용 불가, 가게·점주 불일치, 부적합한 주문 또는 중복 사용인 경우
      */
     @Transactional
@@ -318,14 +281,14 @@ public class CouponService {
         if (!campaign.getStoreId().equals(storeId) || !campaign.getOwnerId().equals(ownerId))
             throw new CouponException(CouponErrorCode.STORE_MISMATCH);
         int amount = discount(campaign, orderAmount, menuId, menuAmount);
-        Instant now = Instant.now(); // after lock wait, not request arrival time
+        LocalDateTime now = LocalDateTime.now(); // after lock wait, not request arrival time
         coupon.requireValidQr(token, now);
         byte[] binaryToken =
                 ByteBuffer.allocate(16)
                         .putLong(token.getMostSignificantBits())
                         .putLong(token.getLeastSignificantBits())
                         .array();
-        if (coupons.consume(coupon.getId(), binaryToken, now.truncatedTo(ChronoUnit.SECONDS)) != 1)
+        if (coupons.consume(coupon.getId(), binaryToken, now) != 1)
             throw new CouponException(CouponErrorCode.INVALID_QR);
         CouponUsageHistory usage =
                 history.saveAndFlush(CouponUsageHistory.used(coupon.getId(), amount, now));
@@ -377,7 +340,7 @@ public class CouponService {
      */
     @Transactional(readOnly = true)
     public Page<CouponView> list(Long userId, int page, int size) {
-        Instant now = Instant.now();
+        LocalDateTime now = LocalDateTime.now();
         return coupons.findByUserIdOrderByCreatedAtDescIdDesc(userId, PageRequest.of(page, size))
                 .map(c -> view(c, now));
     }
@@ -397,7 +360,7 @@ public class CouponService {
                         .orElseThrow(() -> new CouponException(CouponErrorCode.COUPON_NOT_FOUND));
         Optional<CouponUsageHistory> usage = history.findByUserCouponId(id);
         return new CouponDetail(
-                view(coupon, Instant.now()),
+                view(coupon, LocalDateTime.now()),
                 usage.map(CouponUsageHistory::getDiscountAmount).orElse(null),
                 usage.map(CouponUsageHistory::getCreatedAt).orElse(null));
     }
@@ -406,10 +369,10 @@ public class CouponService {
      * 사용자 쿠폰을 외부 조회 DTO로 변환한다. 조회 시각을 기준으로 만료 상태를 계산하며 QR은 제외한다.
      *
      * @param c 변환할 사용자 쿠폰 엔티티
-     * @param now 만료 여부를 판정할 UTC 시각
+     * @param now 만료 여부를 판정할 한국 시각
      * @return 고정 쿠폰 코드·상태·사용 기간·발급 시각을 담은 조회 데이터
      */
-    private CouponView view(UserCoupon c, Instant now) {
+    private CouponView view(UserCoupon c, LocalDateTime now) {
         return new CouponView(
                 c.getId(),
                 c.getEventId(),
