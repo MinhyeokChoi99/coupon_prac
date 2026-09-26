@@ -30,7 +30,7 @@ export function positiveInteger(value, name, maximum) {
 }
 
 /**
- * VU마다 50,000개 ID를 복사하지 않도록 연속 ID를 구간으로 압축한다. ID 공백은 별도 구간으로 유지한다.
+ * VU마다 전체 사용자 ID를 복사하지 않도록 연속 ID를 구간으로 압축한다. ID 공백은 별도 구간으로 유지한다.
  * @param {Array<{id: number|string}>} rows DB에서 ID 오름차순으로 조회한 이번 실행의 사용자 행.
  * @returns {Array<{start: number, count: number}>} 시작 ID와 구간 길이 목록.
  */
@@ -58,20 +58,6 @@ export function userAt(ranges, index) {
     index -= range.count;
   }
   throw new Error('User index outside fixture');
-}
-
-/**
- * 신규 사용자 다섯 명마다 재요청 한 번을 배치한다. 기본 60,000회는 50,000명 + 재요청 10,000회다.
- * @param {number} iteration 전체 VU가 공유하는 0 기반 실행 순번.
- * @param {number} userCount 준비한 사용자 수. 양수이며 5의 배수여야 한다.
- * @returns {number} 사용자 목록의 0 기반 순번. 한 주기를 넘으면 동일 패턴을 반복한다.
- */
-export function userIndexFor(iteration, userCount) {
-  const cycle = userCount / 5 * 6;
-  const position = iteration % cycle;
-  const group = Math.floor(position / 6);
-  const offset = position % 6;
-  return group * 5 + (offset === 5 ? group % 5 : offset);
 }
 
 /**
@@ -104,7 +90,7 @@ export function seedFixture(db, runId, config) {
   }
   for (let offset = 0; offset < config.userCount; offset += BATCH_SIZE) {
     const count = Math.min(BATCH_SIZE, config.userCount - offset);
-    const values = Array(count).fill("(?, 'ACTIVE', UTC_TIMESTAMP(), UTC_TIMESTAMP())").join(',');
+    const values = Array(count).fill("(?, 'ACTIVE', TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP()), TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP()))").join(',');
     const providers = Array.from({ length: count }, (_, i) => `${marker}:${offset + i}`);
     db.exec('INSERT INTO `user` (provider_user_id, status, created_at, updated_at) VALUES ' + values, ...providers);
   }
@@ -117,15 +103,15 @@ export function seedFixture(db, runId, config) {
        issue_quantity, usable_start_time, usable_end_time, notice, target_age_groups,
        daily_budget, start_date, end_date, created_at)
       VALUES (1, 1, 'ACTIVE', 'ALL', 'AMOUNT', 1000, ?, '00:00:00', '23:59:59', ?, '전체',
-       100000, DATE(UTC_TIMESTAMP() + INTERVAL 9 HOUR),
-       DATE(UTC_TIMESTAMP() + INTERVAL 9 HOUR) + INTERVAL 1 DAY, UTC_TIMESTAMP())`,
+       100000, DATE(TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP())),
+       DATE(TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP())) + INTERVAL 1 DAY, TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP()))`,
     config.quantity, marker).lastInsertId();
     const eventId = db.exec(`INSERT INTO coupon_event
       (campaign_id, business_date, coupon_quantity, issue_start_at, issue_end_at,
        usable_start_time, usable_end_time, status, created_at, updated_at)
-      VALUES (?, DATE(UTC_TIMESTAMP() + INTERVAL 9 HOUR), ?, UTC_TIMESTAMP() - INTERVAL 1 SECOND,
-       TIMESTAMPADD(SECOND, ?, UTC_TIMESTAMP()), UTC_TIMESTAMP() - INTERVAL 1 SECOND,
-       TIMESTAMPADD(SECOND, ?, UTC_TIMESTAMP()), 'ACTIVE', UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
+      VALUES (?, DATE(TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP())), ?, TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP()) - INTERVAL 1 SECOND,
+       TIMESTAMPADD(SECOND, ?, TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP())), TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP()) - INTERVAL 1 SECOND,
+       TIMESTAMPADD(SECOND, ?, TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP())), 'ACTIVE', TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP()), TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP()))`,
     campaignId, config.quantity, config.validSeconds, config.validSeconds + 3600).lastInsertId();
     eventIds.push(positiveInteger(eventId, 'event ID', Number.MAX_SAFE_INTEGER));
     for (let offset = 0; offset < config.quantity; offset += BATCH_SIZE) {
@@ -134,7 +120,7 @@ export function seedFixture(db, runId, config) {
       db.exec(`INSERT INTO coupon_inventory
         (event_id, sequence_no, coupon_code, status, usable_start_time, usable_end_time, created_at, updated_at)
         SELECT e.id, seq.sequence_no, RANDOM_BYTES(16), 'AVAILABLE', e.usable_start_time,
-               e.usable_end_time, UTC_TIMESTAMP(), UTC_TIMESTAMP()
+               e.usable_end_time, TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP()), TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP())
         FROM coupon_event e CROSS JOIN (${numbers}) seq WHERE e.id = ?`, eventId);
     }
   }
@@ -148,7 +134,7 @@ export function seedFixture(db, runId, config) {
   }
   const valid = scalar(db, `SELECT COUNT(*) n FROM coupon_event e JOIN campaign c ON c.id = e.campaign_id
     WHERE c.notice = ? AND c.status = 'ACTIVE' AND e.status = 'ACTIVE'
-      AND e.issue_start_at <= UTC_TIMESTAMP() AND e.issue_end_at > UTC_TIMESTAMP()`, marker);
+      AND e.issue_start_at <= TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP()) AND e.issue_end_at > TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP())`, marker);
   if (valid !== config.eventCount) throw new Error('Fixture issuance period already expired');
   return data;
 }
@@ -190,7 +176,7 @@ export function verifyFixture(db, data) {
     JOIN campaign c ON c.id = e.campaign_id WHERE c.notice = ?
     GROUP BY u.event_id, u.user_id HAVING COUNT(*) > 1) duplicated`, marker);
   const dailyMismatch = scalar(db, `SELECT COUNT(*) n FROM (
-    SELECT u.user_id, DATE(u.created_at + INTERVAL 9 HOUR) day, COUNT(*) actual
+    SELECT u.user_id, DATE(u.created_at) day, COUNT(*) actual
     FROM user_coupon u JOIN \`user\` owner ON owner.id = u.user_id
     WHERE owner.provider_user_id LIKE ? GROUP BY u.user_id, day
     ) issued LEFT JOIN coupon_daily_limit d ON d.user_id = issued.user_id AND d.limit_date = issued.day
@@ -198,7 +184,7 @@ export function verifyFixture(db, data) {
   const extraDailyLimits = scalar(db, `SELECT COUNT(*) n FROM coupon_daily_limit d
     JOIN \`user\` owner ON owner.id = d.user_id WHERE owner.provider_user_id LIKE ?
     AND d.issued_count <> (SELECT COUNT(*) FROM user_coupon u WHERE u.user_id = d.user_id
-      AND DATE(u.created_at + INTERVAL 9 HOUR) = d.limit_date)`, marker + ':%');
+      AND DATE(u.created_at) = d.limit_date)`, marker + ':%');
   const issuedTotal = events.reduce((sum, row) => sum + row.coupons, 0);
   const passed = events.length === data.config.eventCount && issuedTotal > 0
     && events.every(row => row.quantity === data.config.quantity && row.inventory === row.quantity

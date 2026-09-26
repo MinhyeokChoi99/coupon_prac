@@ -4,32 +4,38 @@ import crypto from 'k6/crypto';
 import sql from 'k6/x/sql';
 import mysql from 'k6/x/sql/driver/mysql';
 import { check } from 'k6';
-import { Counter, Rate } from 'k6/metrics';
+import { Counter, Rate, Trend } from 'k6/metrics';
 import {
-  positiveInteger, runMarker, seedFixture, verifyFixture, cleanupFixture, userAt, userIndexFor,
+  positiveInteger, runMarker, seedFixture, verifyFixture, cleanupFixture, userAt,
 } from './fixture.js';
 
 const baseUrl = __ENV.BASE_URL || 'http://host.docker.internal:8080';
 const mode = __ENV.K6_MODE || 'run';
-if (!['run', 'cleanup'].includes(mode)) throw new Error('K6_MODE must be run or cleanup');
-const maxRps = positiveInteger(__ENV.K6_MAX_RPS || 2000, 'K6_MAX_RPS', 100000);
-const rampDuration = __ENV.K6_RAMP_DURATION || '60s';
-const preAllocatedVUs = positiveInteger(__ENV.K6_PRE_ALLOCATED_VUS || 1000, 'K6_PRE_ALLOCATED_VUS', 10000);
-const maxVUs = positiveInteger(__ENV.K6_MAX_VUS || 3000, 'K6_MAX_VUS', 10000);
+if (!['run', 'verify', 'cleanup'].includes(mode)) throw new Error('K6_MODE must be run, verify or cleanup');
+const deferVerification = (__ENV.K6_DEFER_VERIFICATION || 'false') === 'true';
+if (!['true', 'false'].includes(__ENV.K6_DEFER_VERIFICATION || 'false')) {
+  throw new Error('K6_DEFER_VERIFICATION must be true or false');
+}
+if (deferVerification && mode !== 'run') throw new Error('K6_DEFER_VERIFICATION is only valid in run mode');
+const maxRps = positiveInteger(__ENV.K6_MAX_RPS || 500, 'K6_MAX_RPS', 100000);
+const rampDuration = __ENV.K6_RAMP_DURATION || '40s';
+const preAllocatedVUs = positiveInteger(__ENV.K6_PRE_ALLOCATED_VUS || 200, 'K6_PRE_ALLOCATED_VUS', 10000);
+const maxVUs = positiveInteger(__ENV.K6_MAX_VUS || 600, 'K6_MAX_VUS', 10000);
 const testId = __ENV.K6_TEST_ID || 'coupon-v1';
 const config = {
-  eventCount: positiveInteger(__ENV.K6_EVENT_COUNT || 30, 'K6_EVENT_COUNT', 1000),
+  eventCount: positiveInteger(__ENV.K6_EVENT_COUNT || 10, 'K6_EVENT_COUNT', 1000),
   quantity: positiveInteger(__ENV.K6_COUPONS_PER_EVENT || 500, 'K6_COUPONS_PER_EVENT', 100000),
-  userCount: positiveInteger(__ENV.K6_USER_COUNT || 50000, 'K6_USER_COUNT', 1000000),
+  userCount: positiveInteger(__ENV.K6_USER_COUNT || 10000, 'K6_USER_COUNT', 1000000),
   validSeconds: positiveInteger(__ENV.K6_VALID_SECONDS || 3600, 'K6_VALID_SECONDS', 86400),
   requireSoldOut: (__ENV.K6_REQUIRE_SOLD_OUT || 'true') === 'true',
 };
-if (config.userCount % 5 !== 0) throw new Error('K6_USER_COUNT must be a multiple of 5');
 if (!['true', 'false'].includes(__ENV.K6_REQUIRE_SOLD_OUT || 'true')) throw new Error('K6_REQUIRE_SOLD_OUT must be true or false');
 if (maxVUs < preAllocatedVUs) throw new Error('K6_MAX_VUS must be >= K6_PRE_ALLOCATED_VUS');
 
 const successfulResponse = new Counter('coupon_issue_success_response');
 const soldOut = new Counter('coupon_issue_sold_out');
+const successfulDuration = new Trend('coupon_issue_success_duration', true);
+const soldOutDuration = new Trend('coupon_issue_sold_out_duration', true);
 const inventoryBusy = new Counter('coupon_issue_inventory_busy');
 const dailyLimitRejected = new Counter('coupon_issue_daily_limit_rejected');
 const unexpectedResponse = new Counter('coupon_issue_unexpected_response');
@@ -41,8 +47,8 @@ http.setResponseCallback(http.expectedStatuses(200, 201, 409));
 export const options = {
   setupTimeout: '5m',
   teardownTimeout: '5m',
-  scenarios: mode === 'cleanup'
-    ? { cleanup_only: { executor: 'shared-iterations', vus: 1, iterations: 1 } }
+  scenarios: mode !== 'run'
+    ? { maintenance_only: { executor: 'shared-iterations', vus: 1, iterations: 1 } }
     : {
       coupon_issuance_ramp_up: {
         executor: 'ramping-arrival-rate',
@@ -54,24 +60,32 @@ export const options = {
         gracefulStop: '30s',
       },
     },
-  thresholds: mode === 'cleanup' ? { coupon_cleanup_success: ['rate==1'] } : {
+  thresholds: mode === 'cleanup' ? { coupon_cleanup_success: ['rate==1'] }
+    : mode === 'verify' ? { coupon_database_validation: ['rate==1'] } : {
     'http_req_duration{name:issue_coupon}': ['p(95)<500', 'p(99)<1000'],
     'http_req_failed{name:issue_coupon}': ['rate==0'],
     dropped_iterations: ['count==0'],
+    coupon_issue_inventory_busy: ['count==0'],
+    coupon_issue_daily_limit_rejected: ['count==0'],
     coupon_issue_unexpected_response: ['count==0'],
-    coupon_database_validation: ['rate==1'],
-    coupon_cleanup_success: ['rate==1'],
+    ...(!deferVerification ? {
+      coupon_database_validation: ['rate==1'],
+      coupon_cleanup_success: ['rate==1'],
+    } : {}),
   },
   tags: { testid: testId },
 };
 
 /**
  * 명시적 DB 쓰기 허용과 DSN을 검사한 뒤 준비/종료 단계용 SQL 연결을 연다. VU는 호출하지 않는다.
+ * @param {boolean} readOnly 검증 전용 모드에서 DB 쓰기 허용을 요구하지 않을지 여부.
  * @returns {object} 호출자가 finally에서 close해야 하는 xk6-sql 연결.
- * @throws {Error} K6_ALLOW_DB_WRITES=1 또는 K6_DB_DSN이 없는 경우.
+ * @throws {Error} 쓰기 모드의 K6_ALLOW_DB_WRITES=1 또는 K6_DB_DSN이 없는 경우.
  */
-function openDatabase() {
-  if (__ENV.K6_ALLOW_DB_WRITES !== '1') throw new Error('Set K6_ALLOW_DB_WRITES=1 for a disposable test DB only');
+function openDatabase(readOnly = false) {
+  if (!readOnly && __ENV.K6_ALLOW_DB_WRITES !== '1') {
+    throw new Error('Set K6_ALLOW_DB_WRITES=1 for a disposable test DB only');
+  }
   if (!__ENV.K6_DB_DSN) throw new Error('K6_DB_DSN is required; it must point to the same test DB as the API');
   return sql.open(mysql, __ENV.K6_DB_DSN);
 }
@@ -79,17 +93,32 @@ function openDatabase() {
 /**
  * 실행마다 새 마커로 DB 데이터를 적재하고 조회 API로 서버 연결을 확인한다.
  * 실패 시 부분 적재를 정리하며 기존 실행 ID 충돌의 데이터는 건드리지 않는다.
- * @returns {object} VU와 teardown에 전달할 fixture. cleanup 모드는 정리 후 cleanupOnly=true를 반환한다.
+ * @returns {object} VU와 teardown에 전달할 fixture. 검증·삭제 모드는 maintenanceOnly=true를 반환한다.
  * @throws {Error} 적재·연결 확인·복구 모드 삭제에 실패한 경우.
  */
 export function setup() {
-  const db = openDatabase();
+  const db = openDatabase(mode === 'verify');
+  if (mode === 'verify') {
+    try {
+      runMarker(__ENV.K6_RUN_ID);
+      const report = verifyFixture(db, { runId: __ENV.K6_RUN_ID, config });
+      console.log('DB_VALIDATION ' + JSON.stringify(report));
+      if (!report.passed) throw new Error('Database validation failed; see DB_VALIDATION report');
+      databaseValidation.add(true);
+      return { maintenanceOnly: true };
+    } catch (error) {
+      databaseValidation.add(false);
+      throw error;
+    } finally {
+      db.close();
+    }
+  }
   if (mode === 'cleanup') {
     try {
       runMarker(__ENV.K6_RUN_ID);
       cleanupFixture(db, __ENV.K6_RUN_ID);
       cleanupSuccess.add(true);
-      return { cleanupOnly: true };
+      return { maintenanceOnly: true };
     } catch (error) {
       cleanupSuccess.add(false);
       throw error;
@@ -129,11 +158,14 @@ export function setup() {
 /**
  * 한 iteration에서 사용자·이벤트를 선택해 v1 발급 API를 한 번 호출하고 응답을 분류한다.
  * @param {object} data setup에서 받은 사용자 ID 구간·이벤트 목록·설정 또는 cleanupOnly 표시.
- * @returns {void} HTTP·업무 결과 메트릭만 기록한다. DB 직접 조회와 응답 기반 재시도는 없다.
+ * @returns {void} 실행 순번에 대응하는 고유 사용자의 발급 결과만 기록한다. DB 직접 조회나 재요청은 없다.
  */
 export default function (data) {
-  if (data.cleanupOnly) return;
-  const index = userIndexFor(exec.scenario.iterationInTest, data.config.userCount);
+  if (data.maintenanceOnly) return;
+  const index = exec.scenario.iterationInTest;
+  if (index >= data.config.userCount) {
+    throw new Error('K6_USER_COUNT must cover all issuance iterations; user reuse is disabled');
+  }
   const userId = userAt(data.userRanges, index);
   const eventId = data.eventIds[index % data.eventIds.length];
   const response = http.post(
@@ -146,12 +178,17 @@ export default function (data) {
 
 /**
  * 부하 종료 후 DB 정합성을 검증하고, 검증 실패 여부와 무관하게 finally에서 실행 데이터를 삭제한다.
- * @param {object} data setup이 반환한 실행 ID와 기대 수량. cleanupOnly이면 추가 작업하지 않는다.
+ * @param {object} data setup이 반환한 실행 ID와 기대 수량. 검증·삭제 모드와 진단 실행에서는 건너뛴다.
  * @returns {void} 삭제 전에 보고서를 출력하고 검증·정리 성공률 메트릭을 기록한다.
  * @throws {Error} DB 검증 또는 정리에 실패한 경우. 강제 종료 시 이 함수 실행은 보장되지 않는다.
  */
 export function teardown(data) {
-  if (data.cleanupOnly) return;
+  if (mode !== 'run') return;
+  if (deferVerification) {
+    console.log('DEFERRED_VERIFICATION RUN_ID=' + data.runId
+      + ' — wait for zero active API requests (or stop the API), then run K6_MODE=verify and K6_MODE=cleanup with this ID');
+    return;
+  }
   const db = openDatabase();
   try {
     const report = verifyFixture(db, data);
@@ -183,13 +220,17 @@ export function teardown(data) {
 function classify(response) {
   if (response.status === 201) {
     successfulResponse.add(1);
+    successfulDuration.add(response.timings.duration);
     return;
   }
   let errorCode = null;
   if (response.status === 409) {
     try { errorCode = response.json('code'); } catch (_) { /* malformed response is unexpected */ }
   }
-  if (errorCode === 'COUPON_SOLD_OUT') soldOut.add(1);
+  if (errorCode === 'COUPON_SOLD_OUT') {
+    soldOut.add(1);
+    soldOutDuration.add(response.timings.duration);
+  }
   else if (errorCode === 'INVENTORY_BUSY') inventoryBusy.add(1);
   else if (errorCode === 'DAILY_ISSUANCE_LIMIT_EXCEEDED') dailyLimitRejected.add(1);
   else {

@@ -7,6 +7,7 @@ k6 한 번 실행으로 **테스트 데이터 적재 → HTTP 부하 → DB 결�
 `K6_VERSION=v1`(기본값)은 실행 디렉터리만 선택하며 API URL을 치환하지 않는다.
 v2 추가 시 자체 API·적재·검증 SQL을 `loadtest/k6/v2/`에 작성한다. 아직 v2 실행 파일은 없다.
 자세한 파일 역할과 버전 추가 규칙은 [k6 디렉터리 안내](../loadtest/k6/README.md)를 참고한다.
+실제 실행 수치, 확인된 장애 징후, 미확정 원인과 다음 실험은 [부하테스트 실험 기록](load-testing-results.md)에 누적한다.
 
 ## 실행 순서
 
@@ -17,6 +18,11 @@ v2 추가 시 자체 API·적재·검증 SQL을 `loadtest/k6/v2/`에 작성한�
 
 앱은 여전히 미리 적재된 데이터를 사용하는 구조다. 자동 스케줄링이나 앱 시작 시 데이터 생성은 없다.
 테스트 실행 전 적재하는 주체만 k6로 옮겼다. 스키마 생성은 앱의 Flyway가 담당한다.
+
+V5부터 DB 시각은 한국 시각이다. k6 SQL은 `TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP())`로 한국 현재 시각을 명시해
+Go SQL 커넥션 풀의 세션 시간대와 관계없이 올바른 값을 적재한다. 검증 날짜는 `DATE(created_at)`이다.
+단일 연결에 `SET time_zone` 한 번을 호출하는 방식은 풀의 다른 연결까지 보장하지 못하므로 사용하지 않는다.
+V4 이하 DB에서는 새 스크립트를 실행하지 않는다. [V5 전환 절차](v1/README.md#한국-시간-저장으로-전환-v5)
 
 ## 준비와 실행
 
@@ -58,22 +64,23 @@ k6는 기존 고정 사용자 ID를 사용하지 않고 이번에 INSERT한 ID�
 | API 주소 | LOAD_TEST_BASE_URL | http://host.docker.internal:8080 |
 | 시나리오 디렉터리 | K6_VERSION | v1 |
 | MySQL 연결 문자열 | K6_DB_DSN | Compose 로컬 coupon DB |
-| 이벤트 수 | K6_EVENT_COUNT | 30 |
+| 이벤트 수 | K6_EVENT_COUNT | 10 |
 | 이벤트당 쿠폰 | K6_COUPONS_PER_EVENT | 500 |
-| 고유 사용자 | K6_USER_COUNT | 50000 (5의 배수) |
-| 최대 요청률 | K6_MAX_RPS | 2000 |
-| 선형 증가 시간 | K6_RAMP_DURATION | 60s |
-| 사전 VU / 최대 VU | K6_PRE_ALLOCATED_VUS / K6_MAX_VUS | 1000 / 3000 |
+| 고유 사용자 | K6_USER_COUNT | 10000 |
+| 최대 요청률 | K6_MAX_RPS | 500 |
+| 선형 증가 시간 | K6_RAMP_DURATION | 40s |
+| 사전 VU / 최대 VU | K6_PRE_ALLOCATED_VUS / K6_MAX_VUS | 200 / 600 |
 | 적재 후 발급 유효 시간 | K6_VALID_SECONDS | 3600초 |
 | 모든 재고 소진 필수 | K6_REQUIRE_SOLD_OUT | true |
+| 진단용 검증·삭제 보류 | K6_DEFER_VERIFICATION | false |
 | Prometheus 실행 구분 | K6_TEST_ID | coupon-선택버전 (기본 coupon-v1) |
 
-기본 부하는 0 → 2000 RPS로 60초간 증가한다. 이론상 60,000회이며 실제 실행 수는 dropped/interrupted iterations도 확인한다.
-다섯 신규 사용자 뒤 한 명을 재요청하는 패턴으로 60,000회에 고유 사용자 50,000명과 재요청 10,000회를 배치한다.
-동일 사용자 재요청은 같은 이벤트로 간다. HTTP 응답에 따른 추가 재시도는 없다.
-설정을 바꾸면 실제 요청 수가 달라진다. 60,000회를 넘기면 사용자 패턴이 반복된다.
+기본 부하는 0 → 500 RPS로 40초간 증가한다. 이론상 약 10,000회이며 실제 실행 수는 dropped/interrupted iterations도 확인한다.
+기본값은 이벤트 10개, 이벤트별 재고 500장으로 총 5,000장을 적재한다. 사용자 10,000명을 준비해 실행 순번마다 서로 다른 사용자로 한 번만 요청한다. 재요청이나 자동 재시도는 없다.
+실행 순번을 이벤트 수로 나눈 나머지로 이벤트를 선택하므로 약 10,000건이 모두 실행되면 이벤트별로 신규 사용자 약 1,000명이 요청한다. 정상 동작이면 이벤트마다 500건 발급 후 나머지는 품절 응답을 받는다.
+설정을 바꿀 때도 `K6_USER_COUNT`를 예상 실행 요청 수 이상으로 지정해야 한다. 사용자가 부족하면 같은 사용자를 재사용하지 않고 해당 iteration을 오류로 처리한다.
 
-짧은 전체 흐름 확인:
+더 짧은 전체 흐름 확인:
 
 ```sh
 K6_ALLOW_DB_WRITES=1 K6_EVENT_COUNT=2 K6_COUPONS_PER_EVENT=5 K6_USER_COUNT=100 \
@@ -97,12 +104,26 @@ docker compose --profile loadtest run --rm k6
 
 정합성 검증 또는 삭제 실패 시 테스트는 0이 아닌 종료 코드를 반환한다.
 성능 기준은 발급 요청만 대상으로 p95 < 500ms, p99 < 1s, 예상하지 않은 응답 0, dropped iterations 0이다.
-성공 응답 수에는 멱등 재응답도 포함되므로 실제 발급 수와 다를 수 있다.
+기본 시나리오에는 동일 사용자의 재요청이 없다. 요청 누락·타임아웃 가능성이 있으므로 실제 발급 수는 HTTP 성공 응답 수와 별도로 DB에서 검증한다.
 INVENTORY_BUSY는 다른 요청이 재고를 잠근 경우이며 품절과 구분한다.
 
 결과는 삭제 전에 로그로 출력되고, 성능 지표는 Compose 설정에 따라 Prometheus remote-write로 전송된다.
 SQL 검증 결과 JSON은 콘솔 로그를 보관해야 한다. 실패한 데이터도 자동 삭제되므로 사후 DB 분석용으로 남지 않는다.
 `coupon_database_validation`, `coupon_cleanup_success` 지표로 검증/삭제 성공 여부를 확인한다.
+클라이언트 요청이 타임아웃된 뒤에도 서버 처리가 계속될 수 있다. 현행 `teardown()`은 서버 측 요청 종료를 확인하지 않고 검증·삭제하므로,
+타임아웃이 발생한 실행의 검증 결과는 그 시점의 스냅샷으로 해석한다. 이 한계와 개선 순서는 [실험 기록](load-testing-results.md)에 남긴다.
+
+### 장애 진단 시 검증·정리 분리
+
+타임아웃이나 연결 고갈을 재현할 때는 테스트 데이터를 즉시 삭제하지 않고, **폐기 가능한 격리 DB**에서 다음 순서로 실행한다.
+
+1. `K6_DEFER_VERIFICATION=true`로 발급 부하만 실행하고 출력된 `RUN_ID`를 보관한다. 이 실행의 종료 코드는 HTTP 성능만 판정하며 DB 정합성 완료를 뜻하지 않는다.
+2. 서버에 진행 중인 발급 요청이 없는지 확인한다. 완료를 확인할 수 없으면 **해당 테스트 앱만 중지**하고, DB에서 진행 중인 트랜잭션이 정리됐는지 확인한다.
+3. 동일한 테스트 DB에서 `K6_MODE=verify K6_RUN_ID=<RUN_ID>`로 DB를 읽기 전용 검증한다. 실행할 때의 `K6_EVENT_COUNT`, `K6_COUPONS_PER_EVENT`, `K6_REQUIRE_SOLD_OUT` 값도 동일하게 지정한다.
+4. 진단 자료를 보관한 뒤 `K6_MODE=cleanup K6_RUN_ID=<RUN_ID> K6_ALLOW_DB_WRITES=1`로 해당 실행 데이터만 삭제한다. 검증이 실패해도 자료 확인 후 별도로 정리한다.
+
+`K6_DEFER_VERIFICATION=true`는 서버 종료를 자동 감지하지 않는다. 앱이 계속 처리 중일 때 `verify` 또는 `cleanup`을 실행하면 안 된다.
+일반 모드의 적재→부하→검증→삭제 동작은 그대로 유지된다.
 
 ## 안전한 삭제와 강제 종료 복구
 

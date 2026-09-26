@@ -26,6 +26,9 @@ K6_VERSION=v1 K6_ALLOW_DB_WRITES=1 docker compose --profile loadtest run --rm k6
 node --test loadtest/k6/v1/fixture.test.mjs
 ```
 
+기본값은 중간 규모 시나리오다: 이벤트 10개, 재고 총 5,000장, 고유 사용자 10,000명,
+0 → 500 RPS로 40초간 증가(약 10,000 요청)한다. 사용자 재요청은 없으며 더 큰 부하는 환경변수로 명시해서 실행한다.
+
 Compose는 `/scripts/${K6_VERSION}/coupon-issuance-ramp-up.js`를 실행한다. 미지정 시 v1이다.
 `K6_TEST_ID`를 지정하지 않으면 메트릭 태그는 `coupon-v1`처럼 선택 버전을 따른다.
 개별 테스트 실행은 명령 경로를 직접 지정한다.

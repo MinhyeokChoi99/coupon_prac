@@ -42,11 +42,11 @@ export function setup() {
     assert(!verifyFixture(db, a).passed, 'no successful issuance must fail validation');
     const id = db.exec(`INSERT INTO user_coupon
       (event_id, user_id, coupon_code, status, usable_start_time, usable_end_time, created_at, updated_at)
-      SELECT event_id, ?, coupon_code, 'ISSUED', usable_start_time, usable_end_time, UTC_TIMESTAMP(), UTC_TIMESTAMP()
+      SELECT event_id, ?, coupon_code, 'ISSUED', usable_start_time, usable_end_time, TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP()), TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP())
       FROM coupon_inventory WHERE event_id = ?`, userAt(a.userRanges, 0), a.eventIds[0]).lastInsertId();
     db.exec("UPDATE coupon_inventory SET status = 'ISSUED' WHERE event_id = ?", a.eventIds[0]);
     db.exec(`INSERT INTO coupon_daily_limit (user_id, issued_count, created_at, updated_at)
-      VALUES (?, 1, UTC_TIMESTAMP(), UTC_TIMESTAMP())`, userAt(a.userRanges, 0));
+      VALUES (?, 1, TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP()), TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP()))`, userAt(a.userRanges, 0));
     assert(verifyFixture(db, a).passed, 'valid issuance must pass');
     db.exec('UPDATE coupon_daily_limit SET issued_count = 2 WHERE user_id = ?', userAt(a.userRanges, 0));
     assert(!verifyFixture(db, a).passed, 'daily count mismatch must fail');
@@ -62,7 +62,7 @@ export function setup() {
     db.exec('UPDATE user_coupon SET user_id = ? WHERE id = ?', userAt(a.userRanges, 0), id);
     assert(refused, 'cross-run reference must block cleanup');
     db.exec(`INSERT INTO coupon_usage_history (user_coupon_id, discount_amount, created_at, updated_at)
-      VALUES (?, 1000, UTC_TIMESTAMP(), UTC_TIMESTAMP())`, id);
+      VALUES (?, 1000, TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP()), TIMESTAMPADD(HOUR, 9, UTC_TIMESTAMP()))`, id);
     cleanupFixture(db, first);
     cleanupFixture(db, first); // 중복 정리도 안전해야 한다.
     const remaining = db.query('SELECT COUNT(*) n FROM campaign WHERE notice = ?', runMarker(second));

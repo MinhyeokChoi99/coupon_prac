@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compactUserIds, userAt, userIndexFor, runMarker, cleanupFixture, seedFixture, positiveInteger } from './fixture.js';
+import { compactUserIds, userAt, runMarker, cleanupFixture, seedFixture, positiveInteger } from './fixture.js';
 
 test('cleanup rejects empty, partial, wildcard and injected run IDs before any SQL', () => {
   const db = { query: () => assert.fail('must not query'), exec: () => assert.fail('must not delete') };
@@ -19,14 +19,15 @@ test('ID compression tolerates gaps and never selects another user', () => {
   assert.throws(() => compactUserIds([{ id: '9007199254740993' }]), /user ID/);
 });
 
-test('default request sequence is exactly 50,000 users and 10,000 retries', () => {
-  const indices = Array.from({ length: 60000 }, (_, i) => userIndexFor(i, 50000));
-  assert.equal(new Set(indices).size, 50000);
-  assert.equal(Math.min(...indices), 0);
-  assert.equal(Math.max(...indices), 49999);
-  assert.equal(userIndexFor(60000, 50000), 0);
-  for (let i = 5; i < indices.length; i += 6) {
-    assert.ok(indices.slice(i - 5, i).includes(indices[i]));
+test('default request sequence assigns one unique user to each of 10,000 requests', () => {
+  const ranges = compactUserIds(Array.from({ length: 10000 }, (_, i) => ({ id: i + 1 })));
+  const userIds = Array.from({ length: 10000 }, (_, iteration) => userAt(ranges, iteration));
+  assert.equal(new Set(userIds).size, 10000);
+  assert.equal(userIds[0], 1);
+  assert.equal(userIds[9999], 10000);
+  assert.throws(() => userAt(ranges, 10000), /outside fixture/);
+  for (let event = 0; event < 10; event += 1) {
+    assert.equal(userIds.filter((_, iteration) => iteration % 10 === event).length, 1000);
   }
 });
 
